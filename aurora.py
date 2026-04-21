@@ -291,7 +291,7 @@ class AuroraClient:
         files = {"image": (os.path.basename(image_path), image_bytes, "image/jpeg")}
         data = {"message": message}
         r = httpx.post(
-            f"{self.server}/api/send/image",
+            f"{self.server}/api/vision",
             files=files,
             data=data,
             headers={"Authorization": f"Bearer {self.api_key}"} if self.api_key else {},
