@@ -284,6 +284,22 @@ class AuroraClient:
         r.raise_for_status()
         return r.json().get("response", "")
 
+    def send_image(self, message: str, image_path: str) -> str:
+        """Send message with image attachment."""
+        with open(image_path, "rb") as f:
+            image_bytes = f.read()
+        files = {"image": (os.path.basename(image_path), image_bytes, "image/jpeg")}
+        data = {"message": message}
+        r = httpx.post(
+            f"{self.server}/api/send/image",
+            files=files,
+            data=data,
+            headers={"Authorization": f"Bearer {self.api_key}"} if self.api_key else {},
+            timeout=self.timeout,
+        )
+        r.raise_for_status()
+        return r.json().get("response", "")
+
 
 # ─── UI ───────────────────────────────────────────────────────────────────────
 
@@ -718,7 +734,29 @@ def send_message(message: str, client: AuroraClient, config: dict = None):
 
     try:
         sid = config.get("session_id") if config else None
-        resp = client.send(message, session_id=sid)
+
+        # Check for image paths in message
+        import re as _re
+        image_exts = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff')
+        image_paths = _re.findall(r'(?:[A-Za-z]:[/\\][^\s,\"]+|~/[^\s,\"]+|\./[^\s,\"]+|/[^\s,\"]+)', message)
+        image_path = None
+        for p in image_paths:
+            p = os.path.abspath(os.path.expanduser(p))
+            if os.path.isfile(p) and p.lower().endswith(image_exts):
+                image_path = p
+                break
+
+        if image_path:
+            # Remove image path from message text
+            clean_msg = message
+            for p in image_paths:
+                clean_msg = clean_msg.replace(p, "").strip()
+            if not clean_msg:
+                clean_msg = "Что на этом изображении?"
+            resp = client.send_image(clean_msg, image_path)
+        else:
+            resp = client.send(message, session_id=sid)
+
         stop_spinner.set()
         spin_thread.join(timeout=1)
         print(f"{PURPLE}{BOLD}Aurora:{RESET} ", end="", flush=True)
