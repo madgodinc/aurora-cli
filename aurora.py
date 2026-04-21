@@ -551,6 +551,33 @@ def handle_command(cmd: str, client: AuroraClient, config: dict) -> bool:
 
 # ─── Отправка сообщения ───────────────────────────────────────────────────────
 
+def _handle_local_request(message: str, config: dict) -> str:
+    """Проверяет упоминание локальных путей и автоматически читает файлы/папки."""
+    import re
+    # Ищем пути типа C:/..., ~/..., ./..., папка/файл
+    paths = re.findall(r'(?:[A-Za-z]:[/\\][^\s,]+|~/[^\s,]+|\./[^\s,]+)', message)
+
+    context_parts = []
+    for p in paths:
+        p = os.path.expanduser(p)
+        p = os.path.abspath(p)
+        if os.path.isdir(p):
+            lp = LocalProject(p)
+            tree = lp.tree_string()
+            context_parts.append(f"[Папка: {p}]\n{tree}")
+        elif os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()[:30000]
+                context_parts.append(f"[Файл: {p}]\n```\n{content}\n```")
+            except Exception as e:
+                context_parts.append(f"[Ошибка чтения {p}: {e}]")
+
+    if context_parts:
+        return message + "\n\n" + "\n\n".join(context_parts)
+    return message
+
+
 def send_message(message: str, client: AuroraClient, config: dict = None):
     """Отправляет сообщение и печатает ответ."""
     import re
@@ -560,11 +587,13 @@ def send_message(message: str, client: AuroraClient, config: dict = None):
     lp = config.get("_local_proj_obj") if config else None
 
     if lp and not message.startswith("/"):
-        # Локальный проект — добавляем дерево файлов в контекст
         tree = lp.tree_string()
         message = f"[Локальный проект: {lp.name}]\nСтруктура:\n{tree}\n\nЗапрос: {message}"
     elif proj and not message.startswith("/"):
         message = f"[Проект: {proj}] {message}"
+    else:
+        # Автоматически подхватываем локальные пути из сообщения
+        message = _handle_local_request(message, config or {})
 
     print(f"\n{PURPLE}{BOLD}Aurora:{RESET} ", end="", flush=True)
     try:
