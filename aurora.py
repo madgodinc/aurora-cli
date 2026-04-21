@@ -39,6 +39,11 @@ CONFIG_DIR = os.path.expanduser("~/.aurora")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 DEFAULT_SERVER = "https://fraylon.net"
 
+# Режимы подтверждения файловых операций
+APPROVE_ASK = "ask"        # Спрашивать каждый раз (по умолчанию)
+APPROVE_AUTO = "auto"      # Не спрашивать, применять всё
+_approve_mode = APPROVE_ASK
+
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -318,11 +323,19 @@ def print_help():
   {CYAN}/project{RESET}         — список проектов, подключение
   {CYAN}/project NAME{RESET}   — подключиться к проекту
   {CYAN}/project off{RESET}    — отключиться от проекта
+  {CYAN}/open PATH{RESET}      — открыть локальную папку
+  {CYAN}/close{RESET}           — закрыть локальный проект
   {CYAN}/files{RESET}           — файлы текущего проекта
+  {CYAN}/approve{RESET}         — переключить режим подтверждений
   {CYAN}/server URL{RESET}      — сменить сервер
   {CYAN}/login{RESET}           — авторизация через браузер
   {CYAN}/logout{RESET}          — выйти из аккаунта
   {CYAN}/quit{RESET}            — выход
+
+{BOLD}Режимы подтверждения:{RESET}
+  По умолчанию Aurora спрашивает перед изменением файлов.
+  /approve auto  — применять все изменения без вопросов
+  /approve ask   — спрашивать каждый раз (по умолчанию)
 
 {BOLD}Использование:{RESET}
   aurora               — интерактивный режим
@@ -512,6 +525,20 @@ def handle_command(cmd: str, client: AuroraClient, config: dict) -> bool:
         config.pop("_local_proj_obj", None)
         print(f"{GREEN}Локальный проект закрыт{RESET}")
 
+    elif command == "/approve":
+        global _approve_mode
+        if arg.lower() in ("auto", "all", "да"):
+            _approve_mode = APPROVE_AUTO
+            print(f"{GREEN}Режим: автоподтверждение{RESET} — файлы применяются без вопросов")
+        elif arg.lower() in ("ask", "manual", "нет"):
+            _approve_mode = APPROVE_ASK
+            print(f"{GREEN}Режим: ручное подтверждение{RESET} — спрашиваю перед каждым изменением")
+        else:
+            current = "автоподтверждение" if _approve_mode == APPROVE_AUTO else "ручное подтверждение"
+            print(f"Текущий режим: {CYAN}{current}{RESET}")
+            print(f"{DIM}/approve auto — не спрашивать{RESET}")
+            print(f"{DIM}/approve ask  — спрашивать каждый раз{RESET}")
+
     elif command == "/files":
         # Local project files
         lp = config.get("_local_proj_obj")
@@ -658,10 +685,23 @@ def send_message(message: str, client: AuroraClient, config: dict = None):
             if file_blocks:
                 for fname, content in file_blocks:
                     fname = fname.strip().lstrip('/')
-                    answer = input(f"\n{GREEN}Создать/обновить {fname}? [y/n]: {RESET}")
-                    if answer.lower() in ('y', 'да', ''):
+                    if _approve_mode == APPROVE_AUTO:
                         result = lp.write_file(fname, content)
-                        print(f"  {DIM}{result}{RESET}")
+                        print(f"\n  {GREEN}✓ {fname}{RESET} {DIM}{result}{RESET}")
+                    else:
+                        print(f"\n  {CYAN}Файл: {fname}{RESET} ({len(content)} символов)")
+                        print(f"  {DIM}Превью: {content[:80].replace(chr(10), ' ')}...{RESET}")
+                        answer = input(f"  {GREEN}Применить? [y/n/a(все)]: {RESET}")
+                        if answer.lower() in ('a', 'all', 'все'):
+                            _approve_mode = APPROVE_AUTO
+                            result = lp.write_file(fname, content)
+                            print(f"  {GREEN}✓ {result}{RESET}")
+                            print(f"  {DIM}Режим: автоподтверждение{RESET}")
+                        elif answer.lower() in ('y', 'да', ''):
+                            result = lp.write_file(fname, content)
+                            print(f"  {GREEN}✓ {result}{RESET}")
+                        else:
+                            print(f"  {DIM}Пропущено{RESET}")
 
         if resp:
             print(f"{resp}\n")
