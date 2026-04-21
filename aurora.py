@@ -270,11 +270,14 @@ class AuroraClient:
                         if text:
                             yield text
 
-    def send(self, message: str) -> str:
-        """POST запрос с поддержкой tools."""
+    def send(self, message: str, session_id: str = None) -> str:
+        """POST запрос с поддержкой tools и сессий."""
+        payload = {"message": message}
+        if session_id:
+            payload["session_id"] = session_id
         r = httpx.post(
             f"{self.server}/api/send",
-            json={"message": message},
+            json=payload,
             headers=self._headers(),
             timeout=self.timeout,
         )
@@ -326,6 +329,10 @@ def print_help():
   {CYAN}/open PATH{RESET}      — открыть локальную папку
   {CYAN}/close{RESET}           — закрыть локальный проект
   {CYAN}/files{RESET}           — файлы текущего проекта
+  {CYAN}/session{RESET}         — список сессий / создать / подключиться
+  {CYAN}/session new{RESET}    — создать сессию (для синхронизации с TG)
+  {CYAN}/session ID{RESET}     — подключиться к сессии
+  {CYAN}/session off{RESET}    — отключиться
   {CYAN}/approve{RESET}         — переключить режим подтверждений
   {CYAN}/server URL{RESET}      — сменить сервер
   {CYAN}/login{RESET}           — авторизация через браузер
@@ -348,12 +355,15 @@ def prompt_input(config: dict = None) -> str:
     try:
         lp = config.get("_local_proj_obj") if config else None
         proj = config.get("active_project") if config else None
+        sid = config.get("session_id") if config else None
+        prefix = ""
         if lp:
-            msg = input(f"{GREEN}{BOLD}[{lp.name}]> {RESET}")
+            prefix = f"[{lp.name}]"
         elif proj:
-            msg = input(f"{GREEN}{BOLD}[{proj}]> {RESET}")
-        else:
-            msg = input(f"{GREEN}{BOLD}> {RESET}")
+            prefix = f"[{proj}]"
+        if sid:
+            prefix = f"[S:{sid[:6]}]{prefix}"
+        msg = input(f"{GREEN}{BOLD}{prefix}> {RESET}")
         return msg.strip()
     except (EOFError, KeyboardInterrupt):
         print()
@@ -525,6 +535,42 @@ def handle_command(cmd: str, client: AuroraClient, config: dict) -> bool:
         config.pop("_local_proj_obj", None)
         print(f"{GREEN}Локальный проект закрыт{RESET}")
 
+    elif command == "/session":
+        if arg.lower() == "new" or arg.lower() == "create":
+            try:
+                name = input(f"{DIM}Название сессии: {RESET}").strip() or ""
+                r = httpx.post(f"{client.server}/api/session/create",
+                              json={"name": name}, headers=client._headers(), timeout=10)
+                data = r.json()
+                sid = data.get("session_id", "")
+                config["session_id"] = sid
+                print(f"\n{GREEN}Сессия создана: {PURPLE}{sid}{RESET}")
+                print(f"{DIM}Для подключения в TG: /session {sid}{RESET}\n")
+            except Exception as e:
+                print(f"{RED}Ошибка: {e}{RESET}")
+        elif arg.lower() == "off" or arg.lower() == "end":
+            config.pop("session_id", None)
+            print(f"{GREEN}Отключена от сессии{RESET}")
+        elif arg:
+            config["session_id"] = arg
+            print(f"{GREEN}Подключена к сессии: {PURPLE}{arg}{RESET}")
+        else:
+            try:
+                r = httpx.get(f"{client.server}/api/sessions", headers=client._headers(), timeout=10)
+                data = r.json()
+                sessions = data.get("sessions", [])
+                current = config.get("session_id")
+                if not sessions:
+                    print(f"{DIM}Нет сессий. /session new — создать{RESET}")
+                else:
+                    print(f"\n{CYAN}Сессии:{RESET}")
+                    for s in sessions:
+                        marker = f" {GREEN}● активна{RESET}" if s["id"] == current else ""
+                        print(f"  {BOLD}{s['id']}{RESET} — {s.get('name', '')}{marker}")
+                    print(f"\n{DIM}/session ID — подключиться | /session new — создать{RESET}\n")
+            except Exception as e:
+                print(f"{RED}Ошибка: {e}{RESET}")
+
     elif command == "/approve":
         global _approve_mode
         if arg.lower() in ("auto", "all", "да"):
@@ -671,7 +717,8 @@ def send_message(message: str, client: AuroraClient, config: dict = None):
     spin_thread.start()
 
     try:
-        resp = client.send(message)
+        sid = config.get("session_id") if config else None
+        resp = client.send(message, session_id=sid)
         stop_spinner.set()
         spin_thread.join(timeout=1)
         print(f"{PURPLE}{BOLD}Aurora:{RESET} ", end="", flush=True)
