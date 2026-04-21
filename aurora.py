@@ -119,6 +119,81 @@ def ensure_auth(config: dict, server: str) -> dict:
     return config
 
 
+# ─── Local Project ───────────────────────────────────────────────────────────
+
+class LocalProject:
+    """Работа с локальной папкой проекта."""
+
+    def __init__(self, path: str):
+        self.path = os.path.abspath(path)
+        self.name = os.path.basename(self.path)
+
+    def list_files(self, max_files=50):
+        """Список файлов рекурсивно."""
+        files = []
+        for root, dirs, fnames in os.walk(self.path):
+            # Skip hidden dirs and common junk
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in
+                       ('node_modules', '__pycache__', 'venv', '.venv', '.git', 'dist', 'build')]
+            for f in fnames:
+                if f.startswith('.'):
+                    continue
+                fp = os.path.join(root, f)
+                rel = os.path.relpath(fp, self.path)
+                size = os.path.getsize(fp)
+                files.append({"name": rel, "size": size})
+                if len(files) >= max_files:
+                    return files
+        return files
+
+    def read_file(self, rel_path: str) -> str:
+        """Прочитать файл."""
+        fp = os.path.normpath(os.path.join(self.path, rel_path))
+        if not fp.startswith(self.path):
+            return "[ОШИБКА: выход за пределы проекта]"
+        if not os.path.isfile(fp):
+            return f"[ОШИБКА: файл не найден: {rel_path}]"
+        try:
+            with open(fp, "r", encoding="utf-8", errors="replace") as f:
+                return f.read()[:50000]
+        except Exception as e:
+            return f"[ОШИБКА: {e}]"
+
+    def write_file(self, rel_path: str, content: str) -> str:
+        """Записать файл."""
+        fp = os.path.normpath(os.path.join(self.path, rel_path))
+        if not fp.startswith(self.path):
+            return "[ОШИБКА: выход за пределы проекта]"
+        os.makedirs(os.path.dirname(fp), exist_ok=True)
+        with open(fp, "w", encoding="utf-8") as f:
+            f.write(content)
+        return f"OK: записан {rel_path}"
+
+    def edit_file(self, rel_path: str, old_text: str, new_text: str) -> str:
+        """Точечная замена в файле."""
+        fp = os.path.normpath(os.path.join(self.path, rel_path))
+        if not fp.startswith(self.path):
+            return "[ОШИБКА: выход за пределы проекта]"
+        if not os.path.isfile(fp):
+            return f"[ОШИБКА: файл не найден]"
+        with open(fp, "r", encoding="utf-8") as f:
+            content = f.read()
+        if old_text not in content:
+            return "[ОШИБКА: текст для замены не найден]"
+        content = content.replace(old_text, new_text, 1)
+        with open(fp, "w", encoding="utf-8") as f:
+            f.write(content)
+        return f"OK: заменено в {rel_path}"
+
+    def tree_string(self) -> str:
+        """Дерево файлов как строка для контекста."""
+        files = self.list_files()
+        lines = [f"{self.name}/"]
+        for f in files:
+            lines.append(f"  {f['name']} ({f['size']}b)")
+        return "\n".join(lines)
+
+
 # ─── API ──────────────────────────────────────────────────────────────────────
 
 class AuroraClient:
@@ -206,10 +281,19 @@ class AuroraClient:
 
 def print_banner():
     cols = shutil.get_terminal_size((80, 24)).columns
-    print()
-    print(f"{PURPLE}{BOLD}  Aurora AI{RESET} {DIM}v{__version__}{RESET}")
+    art = f"""{PURPLE}
+         *            .        *
+                 ★
+        .    *        .            *
+              .  {BOLD}Aurora{RESET}{PURPLE}  .
+         *        ✦        *
+            .        .
+       *                      *
+    {RESET}"""
+    print(art)
+    print(f"{PURPLE}{BOLD}  Aurora AI{RESET} {DIM}v{__version__} — Mad God Inc.{RESET}")
     print(f"{DIM}  {'─' * min(cols - 4, 60)}{RESET}")
-    print(f"{DIM}  /help — справка  |  /quit — выход{RESET}")
+    print(f"{DIM}  /help — справка  |  /project — проекты  |  /open — локальный проект{RESET}")
     print()
 
 
@@ -241,8 +325,11 @@ def print_help():
 
 def prompt_input(config: dict = None) -> str:
     try:
+        lp = config.get("_local_proj_obj") if config else None
         proj = config.get("active_project") if config else None
-        if proj:
+        if lp:
+            msg = input(f"{GREEN}{BOLD}[{lp.name}]> {RESET}")
+        elif proj:
             msg = input(f"{GREEN}{BOLD}[{proj}]> {RESET}")
         else:
             msg = input(f"{GREEN}{BOLD}> {RESET}")
@@ -393,7 +480,41 @@ def handle_command(cmd: str, client: AuroraClient, config: dict) -> bool:
             except Exception as e:
                 print(f"{RED}Ошибка: {e}{RESET}")
 
+    elif command == "/open":
+        path = arg or "."
+        path = os.path.abspath(path)
+        if not os.path.isdir(path):
+            print(f"{RED}Папка не найдена: {path}{RESET}")
+        else:
+            config["local_project"] = path
+            lp = LocalProject(path)
+            config["_local_proj_obj"] = lp
+            files = lp.list_files()
+            print(f"\n{GREEN}Открыт локальный проект: {PURPLE}{lp.name}{RESET}")
+            print(f"{DIM}{path}{RESET}")
+            print(f"{DIM}{len(files)} файлов{RESET}\n")
+            for f in files[:15]:
+                print(f"  {DIM}📄 {f['name']} ({f['size']}b){RESET}")
+            if len(files) > 15:
+                print(f"  {DIM}... и ещё {len(files)-15}{RESET}")
+            print()
+
+    elif command == "/close":
+        config.pop("local_project", None)
+        config.pop("_local_proj_obj", None)
+        print(f"{GREEN}Локальный проект закрыт{RESET}")
+
     elif command == "/files":
+        # Local project files
+        lp = config.get("_local_proj_obj")
+        if lp and not arg:
+            files = lp.list_files()
+            print(f"\n{CYAN}{lp.name}/{RESET}")
+            for f in files:
+                print(f"  📄 {f['name']} {DIM}{f['size']}b{RESET}")
+            print()
+            return True
+
         proj = arg or config.get("active_project")
         if not proj:
             print(f"{RED}Укажи проект: /files NAME или /project для подключения{RESET}")
@@ -423,17 +544,38 @@ def handle_command(cmd: str, client: AuroraClient, config: dict) -> bool:
 # ─── Отправка сообщения ───────────────────────────────────────────────────────
 
 def send_message(message: str, client: AuroraClient, config: dict = None):
-    """Отправляет сообщение и печатает ответ (через /api/send для tool support)."""
-    # Добавить контекст проекта если подключена
+    """Отправляет сообщение и печатает ответ."""
+    import re
+
+    # Контекст проекта
     proj = config.get("active_project") if config else None
-    if proj and not message.startswith("/"):
+    lp = config.get("_local_proj_obj") if config else None
+
+    if lp and not message.startswith("/"):
+        # Локальный проект — добавляем дерево файлов в контекст
+        tree = lp.tree_string()
+        message = f"[Локальный проект: {lp.name}]\nСтруктура:\n{tree}\n\nЗапрос: {message}"
+    elif proj and not message.startswith("/"):
         message = f"[Проект: {proj}] {message}"
+
     print(f"\n{PURPLE}{BOLD}Aurora:{RESET} ", end="", flush=True)
     try:
         resp = client.send(message)
         # Filter raw tool call tags
-        import re
         resp = re.sub(r'<\|tool_call>.*?<tool_call\|>', '', resp, flags=re.DOTALL).strip()
+
+        # Если локальный проект — проверяем есть ли команды на создание/изменение файлов
+        if lp and resp:
+            # Ищем code blocks с именами файлов
+            file_blocks = re.findall(r'`([^`]+\.\w+)`[:\s]*\n```\w*\n([\s\S]*?)```', resp)
+            if file_blocks:
+                for fname, content in file_blocks:
+                    fname = fname.strip().lstrip('/')
+                    answer = input(f"\n{GREEN}Создать/обновить {fname}? [y/n]: {RESET}")
+                    if answer.lower() in ('y', 'да', ''):
+                        result = lp.write_file(fname, content)
+                        print(f"  {DIM}{result}{RESET}")
+
         if resp:
             print(f"{resp}\n")
         else:
