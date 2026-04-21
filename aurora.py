@@ -554,17 +554,50 @@ def handle_command(cmd: str, client: AuroraClient, config: dict) -> bool:
 def _handle_local_request(message: str, config: dict) -> str:
     """Проверяет упоминание локальных путей и автоматически читает файлы/папки."""
     import re
-    # Ищем пути типа C:/..., ~/..., ./..., папка/файл
-    paths = re.findall(r'(?:[A-Za-z]:[/\\][^\s,]+|~/[^\s,]+|\./[^\s,]+)', message)
+
+    # 1. Ищем явные пути: C:/..., ~/..., ./...
+    paths = re.findall(r'(?:[A-Za-z]:[/\\][^\s,\"]+|~/[^\s,\"]+|\./[^\s,\"]+)', message)
+
+    # 2. Ищем упоминания "папка X на рабочем столе" / "папку brain-work"
+    desktop = os.path.expanduser("~/Desktop")
+    folder_mentions = re.findall(r'(?:папк[уае]\s+|folder\s+|директори[юя]\s+)(\S+)', message, re.IGNORECASE)
+    for name in folder_mentions:
+        name = name.strip('.,!?"\' ')
+        # Попробовать на рабочем столе
+        candidate = os.path.join(desktop, name)
+        if os.path.isdir(candidate):
+            paths.append(candidate)
+        # Попробовать в текущей папке
+        elif os.path.isdir(name):
+            paths.append(os.path.abspath(name))
+
+    # 3. Ищем "на рабочем столе есть X" / "рабочем столе X"
+    desk_mentions = re.findall(r'(?:рабоч\w+\s+стол\w*\s+(?:есть\s+|)?)(\S+)', message, re.IGNORECASE)
+    for name in desk_mentions:
+        name = name.strip('.,!?"\' ')
+        if name.lower() in ('и', 'а', 'что', 'там', 'папку', 'файл', 'есть'):
+            continue
+        candidate = os.path.join(desktop, name)
+        if os.path.isdir(candidate):
+            paths.append(candidate)
+        elif os.path.isfile(candidate):
+            paths.append(candidate)
+
+    # Убрать дубли
+    seen = set()
+    unique_paths = []
+    for p in paths:
+        p = os.path.abspath(os.path.expanduser(p))
+        if p not in seen:
+            seen.add(p)
+            unique_paths.append(p)
 
     context_parts = []
-    for p in paths:
-        p = os.path.expanduser(p)
-        p = os.path.abspath(p)
+    for p in unique_paths:
         if os.path.isdir(p):
             lp = LocalProject(p)
             tree = lp.tree_string()
-            context_parts.append(f"[Папка: {p}]\n{tree}")
+            context_parts.append(f"[Содержимое папки: {p}]\n{tree}")
         elif os.path.isfile(p):
             try:
                 with open(p, "r", encoding="utf-8", errors="replace") as f:
@@ -595,9 +628,26 @@ def send_message(message: str, client: AuroraClient, config: dict = None):
         # Автоматически подхватываем локальные пути из сообщения
         message = _handle_local_request(message, config or {})
 
-    print(f"\n{PURPLE}{BOLD}Aurora:{RESET} ", end="", flush=True)
+    # Анимация "думает"
+    import threading
+    stop_spinner = threading.Event()
+    def spinner():
+        frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        i = 0
+        while not stop_spinner.is_set():
+            print(f"\r{PURPLE}  {frames[i % len(frames)]} Aurora думает...{RESET}  ", end="", flush=True)
+            i += 1
+            stop_spinner.wait(0.1)
+        print(f"\r{' ' * 40}\r", end="", flush=True)
+
+    spin_thread = threading.Thread(target=spinner, daemon=True)
+    spin_thread.start()
+
     try:
         resp = client.send(message)
+        stop_spinner.set()
+        spin_thread.join(timeout=1)
+        print(f"{PURPLE}{BOLD}Aurora:{RESET} ", end="", flush=True)
         # Filter raw tool call tags
         resp = re.sub(r'<\|tool_call>.*?<tool_call\|>', '', resp, flags=re.DOTALL).strip()
 
@@ -618,10 +668,10 @@ def send_message(message: str, client: AuroraClient, config: dict = None):
         else:
             print(f"{DIM}(выполняю действие...){RESET}\n")
     except KeyboardInterrupt:
+        stop_spinner.set()
         print(f"\n{DIM}(прервано){RESET}\n")
     except Exception as e:
-        print(f"\n{RED}Ошибка{RESET}: {e}\n")
-    except Exception as e:
+        stop_spinner.set()
         print(f"\n{RED}Ошибка{RESET}: {e}\n")
 
 
