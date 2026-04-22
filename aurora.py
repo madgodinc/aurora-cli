@@ -931,17 +931,28 @@ def send_message(message: str, client: AuroraClient, config: dict = None):
         # Автоматически подхватываем локальные пути из сообщения
         message = _handle_local_request(message, config or {})
 
-    # Анимация "думает"
+    # Анимация "думает" с таймером
     import threading
+    import time as _time
+    _spin_start = _time.time()
     stop_spinner = threading.Event()
     def spinner():
         frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
         i = 0
         while not stop_spinner.is_set():
-            print(f"\r{PURPLE}  {frames[i % len(frames)]} Aurora думает...{RESET}  ", end="", flush=True)
+            elapsed = int(_time.time() - _spin_start)
+            if elapsed < 30:
+                status = "думает..."
+            elif elapsed < 60:
+                status = "использует инструменты..."
+            elif elapsed < 120:
+                status = "работает (сложная задача)..."
+            else:
+                status = "всё ещё работает..."
+            print(f"\r{PURPLE}  {frames[i % len(frames)]} Aurora {status} ({elapsed}с){RESET}    ", end="", flush=True)
             i += 1
             stop_spinner.wait(0.1)
-        print(f"\r{' ' * 40}\r", end="", flush=True)
+        print(f"\r{' ' * 60}\r", end="", flush=True)
 
     spin_thread = threading.Thread(target=spinner, daemon=True)
     spin_thread.start()
