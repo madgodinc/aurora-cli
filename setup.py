@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name="aurora-cli",
-    version="0.3.0",
+    version="0.4.0",
     description="CLI-клиент для Aurora AI",
     py_modules=["aurora"],
     python_requires=">=3.8",

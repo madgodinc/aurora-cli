@@ -19,7 +19,7 @@ except ImportError:
     print("Ошибка: установи httpx — pip install httpx")
     sys.exit(1)
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 # ─── Цвета ────────────────────────────────────────────────────────────────────
 
@@ -978,9 +978,74 @@ def send_message(message: str, client: AuroraClient, config: dict = None):
 
         stop_spinner.set()
         spin_thread.join(timeout=1)
-        print(f"{PURPLE}{BOLD}Aurora:{RESET} ", end="", flush=True)
+
         # Filter raw tool call tags
         resp = re.sub(r'<\|tool_call>.*?<tool_call\|>', '', resp, flags=re.DOTALL).strip()
+
+        # Handle local_shell — execute commands on user's PC
+        local_exec_rounds = 0
+        while "[LOCAL_EXEC_PENDING]" in resp and local_exec_rounds < 5:
+            local_exec_rounds += 1
+            # Extract command and reason
+            match = re.search(r'\[LOCAL_EXEC_PENDING\]\s*command=(.*?)\s*reason=(.*?)(?:\n|$)', resp)
+            if not match:
+                break
+            cmd = match.group(1).strip()
+            reason = match.group(2).strip()
+
+            # Clean response — show only text before the marker
+            clean_resp = resp[:resp.index("[LOCAL_EXEC_PENDING]")].strip()
+            if clean_resp:
+                print(f"{PURPLE}{BOLD}Aurora:{RESET} {clean_resp}")
+
+            # Ask user permission
+            print(f"\n  {YELLOW}Aurora хочет выполнить команду на вашем ПК:{RESET}")
+            print(f"  {CYAN}$ {cmd}{RESET}")
+            if reason:
+                print(f"  {DIM}Причина: {reason}{RESET}")
+            answer = input(f"  {GREEN}Разрешить? [y/n]: {RESET}").strip().lower()
+
+            if answer in ('y', 'yes', 'да', ''):
+                print(f"  {DIM}Выполняю...{RESET}")
+                try:
+                    import subprocess
+                    # Detect OS and use appropriate shell
+                    if sys.platform == "win32":
+                        result = subprocess.run(
+                            ["powershell", "-Command", cmd],
+                            capture_output=True, text=True, timeout=60
+                        )
+                    else:
+                        result = subprocess.run(
+                            cmd, shell=True,
+                            capture_output=True, text=True, timeout=60
+                        )
+                    output = result.stdout.strip()
+                    if result.stderr.strip():
+                        output += "\n[STDERR] " + result.stderr.strip()
+                    if not output:
+                        output = "(команда выполнена, вывод пустой)"
+                    print(f"  {GREEN}Результат:{RESET}\n  {output[:500]}")
+
+                    # Send result back to Aurora for analysis
+                    followup = f"Результат команды `{cmd}`:\n```\n{output[:2000]}\n```\nПроанализируй результат и продолжай решать задачу."
+                    print(f"\n{PURPLE}  ⠋ Aurora анализирует результат...{RESET}")
+                    resp = client.send(followup, session_id=sid)
+                    resp = re.sub(r'<\|tool_call>.*?<tool_call\|>', '', resp, flags=re.DOTALL).strip()
+                except subprocess.TimeoutExpired:
+                    print(f"  {RED}Таймаут (60 сек){RESET}")
+                    resp = ""
+                    break
+                except Exception as e:
+                    print(f"  {RED}Ошибка: {e}{RESET}")
+                    resp = ""
+                    break
+            else:
+                print(f"  {DIM}Отклонено{RESET}")
+                resp = client.send("Пользователь отклонил выполнение команды. Предложи альтернативное решение.", session_id=sid)
+                resp = re.sub(r'<\|tool_call>.*?<tool_call\|>', '', resp, flags=re.DOTALL).strip()
+
+        print(f"{PURPLE}{BOLD}Aurora:{RESET} ", end="", flush=True)
 
         # Если локальный проект — проверяем есть ли команды на создание/изменение файлов
         if lp and resp:
