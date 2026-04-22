@@ -990,8 +990,13 @@ def send_message(message: str, client: AuroraClient, config: dict = None):
         stop_spinner.set()
         spin_thread.join(timeout=1)
 
-        # Filter raw tool call tags
-        resp = re.sub(r'<\|tool_call>.*?<tool_call\|>', '', resp, flags=re.DOTALL).strip()
+        # Filter raw tool call tags and leaked tool syntax
+        resp = re.sub(r'<\|tool_call>.*?<tool_call\|>', '', resp, flags=re.DOTALL)
+        resp = re.sub(r'\[web_search\(.*?\)\]', '', resp)
+        resp = re.sub(r'\[web_fetch\(.*?\)\]', '', resp)
+        resp = re.sub(r'\[\w+\(.*?\)\]', '', resp)
+        resp = re.sub(r'```tool_code\n.*?```', '', resp, flags=re.DOTALL)
+        resp = resp.strip()
 
         # Handle local_shell — execute commands on user's PC
         local_exec_rounds = 0
