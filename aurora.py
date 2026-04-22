@@ -1086,9 +1086,50 @@ def send_message(message: str, client: AuroraClient, config: dict = None):
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
+def check_for_updates():
+    """Check GitHub for newer version and auto-update if available."""
+    try:
+        import subprocess
+        # Get latest version from GitHub
+        r = httpx.get(
+            "https://raw.githubusercontent.com/madgodinc/aurora-cli/main/setup.py",
+            timeout=5.0
+        )
+        if r.status_code != 200:
+            return
+        import re
+        match = re.search(r'version="([\d.]+)"', r.text)
+        if not match:
+            return
+        remote_version = match.group(1)
+        if remote_version == __version__:
+            return
+        # Compare versions
+        local_parts = [int(x) for x in __version__.split(".")]
+        remote_parts = [int(x) for x in remote_version.split(".")]
+        if remote_parts <= local_parts:
+            return
+        print(f"{YELLOW}Доступна новая версия: {__version__} → {remote_version}{RESET}")
+        print(f"{DIM}Обновляю...{RESET}")
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--upgrade", "--quiet",
+             "git+https://github.com/madgodinc/aurora-cli.git"],
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode == 0:
+            print(f"{GREEN}Обновлено до v{remote_version}! Перезапусти aurora для применения.{RESET}\n")
+        else:
+            print(f"{DIM}Не удалось обновить автоматически. Вручную: pip install --upgrade git+https://github.com/madgodinc/aurora-cli.git{RESET}\n")
+    except Exception:
+        pass  # Silent fail — don't block startup
+
+
 def main():
     # Сигнал для ctrl+c
     signal.signal(signal.SIGINT, lambda *_: None)
+
+    # Auto-update check
+    check_for_updates()
 
     config = load_config()
     server = config.get("server", DEFAULT_SERVER)
