@@ -19,7 +19,7 @@ except ImportError:
     print("Ошибка: установи httpx — pip install httpx")
     sys.exit(1)
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 
 # ─── Цвета ────────────────────────────────────────────────────────────────────
 
@@ -199,6 +199,117 @@ class LocalProject:
         return "\n".join(lines)
 
 
+# ─── Local Vault ─────────────────────────────────────────────────────────────
+
+class LocalVault:
+    """Локальное хранилище: история, память, контекст."""
+
+    def __init__(self, base_dir=None):
+        self.base = base_dir or CONFIG_DIR
+        self.sessions_dir = os.path.join(self.base, "sessions")
+        self.memory_dir = os.path.join(self.base, "memory")
+        self.context_file = os.path.join(self.base, "context.json")
+        os.makedirs(self.sessions_dir, exist_ok=True)
+        os.makedirs(self.memory_dir, exist_ok=True)
+
+    def save_message(self, role, content, session_id=None):
+        """Автосохранение каждого сообщения в текущую сессию."""
+        from datetime import datetime
+        sid = session_id or "default"
+        session_file = os.path.join(self.sessions_dir, f"{sid}.jsonl")
+        entry = {
+            "role": role,
+            "content": content[:5000],  # Truncate for storage
+            "timestamp": datetime.now().isoformat()
+        }
+        with open(session_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    def get_session_history(self, session_id=None, last_n=20):
+        """Получить последние N сообщений сессии."""
+        sid = session_id or "default"
+        session_file = os.path.join(self.sessions_dir, f"{sid}.jsonl")
+        if not os.path.exists(session_file):
+            return []
+        lines = open(session_file, "r", encoding="utf-8").readlines()
+        result = []
+        for line in lines[-last_n:]:
+            try:
+                result.append(json.loads(line))
+            except Exception:
+                pass
+        return result
+
+    def save_context(self, context_data):
+        """Сохранить сжатый контекст для восстановления."""
+        with open(self.context_file, "w", encoding="utf-8") as f:
+            json.dump(context_data, f, ensure_ascii=False, indent=2)
+
+    def load_context(self):
+        """Загрузить сохранённый контекст."""
+        if os.path.exists(self.context_file):
+            try:
+                with open(self.context_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return None
+
+    def save_memory(self, key, value):
+        """Сохранить факт в локальную память."""
+        mem_file = os.path.join(self.memory_dir, "facts.json")
+        facts = {}
+        if os.path.exists(mem_file):
+            try:
+                with open(mem_file, "r", encoding="utf-8") as f:
+                    facts = json.load(f)
+            except Exception:
+                pass
+        facts[key] = value
+        with open(mem_file, "w", encoding="utf-8") as f:
+            json.dump(facts, f, ensure_ascii=False, indent=2)
+
+    def get_memory(self):
+        """Получить все факты из локальной памяти."""
+        mem_file = os.path.join(self.memory_dir, "facts.json")
+        if os.path.exists(mem_file):
+            try:
+                with open(mem_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
+    def export_session(self, session_id=None):
+        """Экспортировать сессию в Markdown."""
+        history = self.get_session_history(session_id, last_n=1000)
+        if not history:
+            return None
+        from datetime import datetime
+        lines = [f"# Aurora Session Export", f"> {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"]
+        for msg in history:
+            role = "User" if msg["role"] == "user" else "Aurora"
+            ts = msg.get("timestamp", "")[:16]
+            lines.append(f"### {role} ({ts})\n")
+            lines.append(msg["content"] + "\n")
+        return "\n".join(lines)
+
+    def list_sessions(self):
+        """Список локальных сессий."""
+        sessions = []
+        for f in sorted(os.listdir(self.sessions_dir)):
+            if f.endswith(".jsonl"):
+                path = os.path.join(self.sessions_dir, f)
+                size = os.path.getsize(path)
+                lines = sum(1 for _ in open(path, encoding="utf-8"))
+                sessions.append({
+                    "id": f.replace(".jsonl", ""),
+                    "messages": lines,
+                    "size": size,
+                })
+        return sessions
+
+
 # ─── API ──────────────────────────────────────────────────────────────────────
 
 class AuroraClient:
@@ -354,6 +465,14 @@ def print_help():
   {CYAN}/login{RESET}           — авторизация через браузер
   {CYAN}/logout{RESET}          — выйти из аккаунта
   {CYAN}/quit{RESET}            — выход
+
+{BOLD}Локальное хранилище:{RESET}
+  {CYAN}/memory{RESET}           — показать локальную память
+  {CYAN}/memory key=val{RESET}  — сохранить факт
+  {CYAN}/compress{RESET}         — сжать контекст сессии
+  {CYAN}/export{RESET}           — экспортировать сессию в Markdown
+  {CYAN}/history{RESET}          — последние 10 сообщений
+  {CYAN}/sessions{RESET}         — список локальных сессий
 
 {BOLD}Режимы подтверждения:{RESET}
   По умолчанию Aurora спрашивает перед изменением файлов.
@@ -631,6 +750,99 @@ def handle_command(cmd: str, client: AuroraClient, config: dict) -> bool:
             except Exception as e:
                 print(f"{RED}Ошибка: {e}{RESET}")
 
+    elif command == "/compress":
+        vault = config.get("_vault")
+        if not vault:
+            print(f"{RED}Vault не инициализирован{RESET}")
+            return True
+        sid = config.get("session_id", "default")
+        history = vault.get_session_history(sid, last_n=50)
+        if not history:
+            print(f"{DIM}Нет истории для сжатия{RESET}")
+            return True
+        # Send to Aurora for summarization
+        msgs_text = "\n".join(f"{m['role']}: {m['content'][:200]}" for m in history[-20:])
+        summary_prompt = f"Сожми этот диалог в краткое резюме (3-5 предложений), сохрани ключевые факты и решения:\n\n{msgs_text}"
+        try:
+            print(f"{DIM}Сжимаю контекст...{RESET}")
+            summary = client.send(summary_prompt)
+            vault.save_context({"summary": summary, "session_id": sid, "messages_compressed": len(history)})
+            print(f"\n{GREEN}Контекст сжат и сохранён{RESET}")
+            print(f"{DIM}{summary[:300]}...{RESET}\n")
+        except Exception as e:
+            print(f"{RED}Ошибка: {e}{RESET}")
+
+    elif command == "/memory":
+        vault = config.get("_vault")
+        if not vault:
+            print(f"{RED}Vault не инициализирован{RESET}")
+            return True
+        if arg:
+            # Save a fact
+            if "=" in arg:
+                key, val = arg.split("=", 1)
+                vault.save_memory(key.strip(), val.strip())
+                print(f"{GREEN}Сохранено: {key.strip()} = {val.strip()}{RESET}")
+            else:
+                print(f"{DIM}Формат: /memory ключ = значение{RESET}")
+        else:
+            facts = vault.get_memory()
+            if not facts:
+                print(f"{DIM}Память пуста. /memory ключ = значение — сохранить факт{RESET}")
+            else:
+                print(f"\n{CYAN}Локальная память:{RESET}")
+                for k, v in facts.items():
+                    print(f"  {BOLD}{k}{RESET}: {v}")
+                print()
+
+    elif command == "/export":
+        vault = config.get("_vault")
+        if not vault:
+            print(f"{RED}Vault не инициализирован{RESET}")
+            return True
+        sid = arg or config.get("session_id", "default")
+        md = vault.export_session(sid)
+        if not md:
+            print(f"{DIM}Нет истории для экспорта{RESET}")
+            return True
+        export_file = os.path.join(CONFIG_DIR, f"export_{sid}.md")
+        with open(export_file, "w", encoding="utf-8") as f:
+            f.write(md)
+        print(f"{GREEN}Экспортировано: {export_file}{RESET}")
+
+    elif command == "/history":
+        vault = config.get("_vault")
+        if not vault:
+            print(f"{RED}Vault не инициализирован{RESET}")
+            return True
+        sid = config.get("session_id", "default")
+        history = vault.get_session_history(sid, last_n=10)
+        if not history:
+            print(f"{DIM}Нет истории{RESET}")
+        else:
+            print(f"\n{CYAN}Последние сообщения:{RESET}")
+            for msg in history:
+                role = f"{GREEN}Вы{RESET}" if msg["role"] == "user" else f"{PURPLE}Aurora{RESET}"
+                ts = msg.get("timestamp", "")[:16]
+                content = msg["content"][:100].replace("\n", " ")
+                print(f"  {DIM}{ts}{RESET} {role}: {content}")
+            print()
+
+    elif command == "/sessions":
+        vault = config.get("_vault")
+        if not vault:
+            print(f"{RED}Vault не инициализирован{RESET}")
+            return True
+        sessions = vault.list_sessions()
+        if not sessions:
+            print(f"{DIM}Нет локальных сессий{RESET}")
+        else:
+            print(f"\n{CYAN}Локальные сессии:{RESET}")
+            for s in sessions:
+                current = " ● " if s["id"] == config.get("session_id", "default") else "   "
+                print(f"  {GREEN}{current}{RESET}{s['id']} — {s['messages']} сообщений ({s['size']}b)")
+            print()
+
     else:
         print(f"{RED}Неизвестная команда{RESET}: {command}")
         print(f"{DIM}Введи /help для справки{RESET}")
@@ -704,6 +916,8 @@ def send_message(message: str, client: AuroraClient, config: dict = None):
     """Отправляет сообщение и печатает ответ."""
     import re
 
+    original_message = message
+
     # Контекст проекта
     proj = config.get("active_project") if config else None
     lp = config.get("_local_proj_obj") if config else None
@@ -756,6 +970,11 @@ def send_message(message: str, client: AuroraClient, config: dict = None):
             resp = client.send_image(clean_msg, image_path)
         else:
             resp = client.send(message, session_id=sid)
+
+        vault = config.get("_vault") if config else None
+        if vault:
+            vault.save_message("user", original_message, sid)
+            vault.save_message("assistant", resp, sid)
 
         stop_spinner.set()
         spin_thread.join(timeout=1)
@@ -813,6 +1032,9 @@ def main():
     config = ensure_auth(config, server)
 
     client = AuroraClient(server, api_key=config.get("api_key"))
+
+    vault = LocalVault()
+    config["_vault"] = vault
 
     # Single-shot mode
     if len(sys.argv) > 1:
