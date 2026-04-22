@@ -316,7 +316,7 @@ class AuroraClient:
     def __init__(self, server_url: str, api_key: str = None):
         self.server = server_url.rstrip("/")
         self.api_key = api_key
-        self.timeout = httpx.Timeout(120.0, connect=10.0)
+        self.timeout = httpx.Timeout(180.0, connect=10.0)
 
     def _headers(self):
         h = {"Content-Type": "application/json"}
@@ -1028,9 +1028,25 @@ def send_message(message: str, client: AuroraClient, config: dict = None):
                     print(f"  {GREEN}Результат:{RESET}\n  {output[:500]}")
 
                     # Send result back to Aurora for analysis
-                    followup = f"Результат команды `{cmd}`:\n```\n{output[:2000]}\n```\nПроанализируй результат и продолжай решать задачу."
-                    print(f"\n{PURPLE}  ⠋ Aurora анализирует результат...{RESET}")
-                    resp = client.send(followup, session_id=sid)
+                    followup = f"Результат команды `{cmd}`:\n```\n{output[:2000]}\n```\nКоротко проанализируй и скажи что дальше."
+                    # Spinner for analysis
+                    import threading as _th
+                    _stop = _th.Event()
+                    def _spin():
+                        _f = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
+                        _i = 0
+                        while not _stop.is_set():
+                            print(f"\r{PURPLE}  {_f[_i%10]} Aurora анализирует...{RESET}  ", end="", flush=True)
+                            _i += 1
+                            _stop.wait(0.1)
+                        print(f"\r{' '*40}\r", end="", flush=True)
+                    _t = _th.Thread(target=_spin, daemon=True)
+                    _t.start()
+                    try:
+                        resp = client.send(followup, session_id=sid)
+                    finally:
+                        _stop.set()
+                        _t.join(timeout=1)
                     resp = re.sub(r'<\|tool_call>.*?<tool_call\|>', '', resp, flags=re.DOTALL).strip()
                 except subprocess.TimeoutExpired:
                     print(f"  {RED}Таймаут (60 сек){RESET}")
