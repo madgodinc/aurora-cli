@@ -524,6 +524,22 @@ def handle_command(cmd: str, client: AuroraClient, config: dict) -> bool:
         os.system("cls" if os.name == "nt" else "clear")
         print_banner()
 
+    elif command == "/new":
+        # Clear server-side history
+        try:
+            httpx.post(
+                f"{client.server}/api/clear",
+                headers=client._headers(),
+                timeout=10.0
+            )
+        except Exception:
+            pass
+        vault = config.get("_vault")
+        if vault:
+            new_sid = f"chat_{int(__import__('time').time())}"
+            config["session_id"] = new_sid
+        print(f"{GREEN}Новый чат начат.{RESET} История очищена.\n")
+
     elif command == "/health":
         try:
             data = client.health()
