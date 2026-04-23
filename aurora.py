@@ -493,6 +493,8 @@ class AuroraClient:
                             yield ("reasoning", data["reasoning"])
                         if data.get("text"):
                             yield ("text", data["text"])
+                        if data.get("tool"):
+                            yield ("tool", {"name": data["tool"], "status": data.get("status", ""), "preview": data.get("preview", "")})
 
     def send(self, message: str, session_id: str = None) -> str:
         """POST запрос с поддержкой tools и сессий."""
@@ -1122,6 +1124,24 @@ def send_message(message: str, client: AuroraClient, config: dict = None):
                             print(f"\n  {DIM}{PURPLE}│{RESET} {DIM}", end="", flush=True)
                         else:
                             print(f"{DIM}{ch}{RESET}", end="", flush=True)
+
+                elif chunk_type == "tool":
+                    tool_info = chunk_data
+                    name = tool_info.get("name", "?")
+                    status = tool_info.get("status", "")
+                    preview = tool_info.get("preview", "")
+                    if in_reasoning:
+                        print(f"\n  {DIM}{PURPLE}╰{'─' * 38}{RESET}")
+                        in_reasoning = False
+                    if not reasoning_shown:
+                        print(f"\r{' ' * 50}\r", end="", flush=True)
+                        reasoning_shown = True
+                    if status == "running":
+                        print(f"  {YELLOW}⚡ {name}{RESET} {DIM}...{RESET}", flush=True)
+                    elif status == "error":
+                        print(f"  {RED}✗ {name}{RESET} {DIM}{preview[:80]}{RESET}", flush=True)
+                    else:
+                        print(f"  {GREEN}✓ {name}{RESET} {DIM}{preview[:80]}{RESET}", flush=True)
 
                 elif chunk_type == "text":
                     if in_reasoning:
