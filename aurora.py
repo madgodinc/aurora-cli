@@ -19,7 +19,7 @@ except ImportError:
     print("Ошибка: установи httpx — pip install httpx")
     sys.exit(1)
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 # ─── Цвета ────────────────────────────────────────────────────────────────────
 
@@ -31,6 +31,93 @@ RESET = "\033[0m"
 CYAN = "\033[36m"
 RED = "\033[31m"
 YELLOW = "\033[33m"
+BLUE = "\033[34m"
+WHITE = "\033[37m"
+BG_DARK = "\033[48;5;236m"  # dark gray background for code blocks
+ITALIC = "\033[3m"
+UNDERLINE = "\033[4m"
+MAGENTA = "\033[95m"
+
+# ─── Markdown рендер для терминала ────────────────────────────────────────────
+
+def render_markdown(text: str) -> str:
+    """Рендерит markdown-подобный текст в ANSI-цвета для терминала."""
+    import re
+    lines = text.split("\n")
+    result = []
+    in_code_block = False
+    code_lang = ""
+
+    for line in lines:
+        # Code blocks
+        if line.strip().startswith("```"):
+            if not in_code_block:
+                in_code_block = True
+                code_lang = line.strip()[3:].strip()
+                lang_label = f" {code_lang}" if code_lang else ""
+                result.append(f"  {DIM}{BG_DARK} {CYAN}{lang_label} {RESET}")
+                continue
+            else:
+                in_code_block = False
+                result.append(f"  {DIM}{BG_DARK} {'─' * 40} {RESET}")
+                continue
+
+        if in_code_block:
+            result.append(f"  {BG_DARK}{GREEN} {line} {RESET}")
+            continue
+
+        # Headers
+        if line.startswith("### "):
+            result.append(f"  {PURPLE}{BOLD}{line[4:]}{RESET}")
+            continue
+        if line.startswith("## "):
+            result.append(f"\n  {PURPLE}{BOLD}{line[3:]}{RESET}")
+            continue
+        if line.startswith("# "):
+            result.append(f"\n  {PURPLE}{BOLD}{UNDERLINE}{line[2:]}{RESET}")
+            continue
+
+        # Horizontal rule
+        if line.strip() in ("---", "***", "___"):
+            cols = shutil.get_terminal_size((80, 24)).columns
+            result.append(f"  {DIM}{'─' * min(cols - 6, 60)}{RESET}")
+            continue
+
+        # Bullet points
+        if re.match(r'^(\s*)[*\-+]\s', line):
+            indent = re.match(r'^(\s*)', line).group(1)
+            content = re.sub(r'^(\s*)[*\-+]\s', '', line)
+            content = _inline_format(content)
+            result.append(f"  {indent}{CYAN}>{RESET} {content}")
+            continue
+
+        # Numbered lists
+        if re.match(r'^\s*\d+\.\s', line):
+            num_match = re.match(r'^(\s*)(\d+\.)\s(.*)', line)
+            if num_match:
+                indent, num, content = num_match.groups()
+                content = _inline_format(content)
+                result.append(f"  {indent}{YELLOW}{num}{RESET} {content}")
+                continue
+
+        # Regular text with inline formatting
+        result.append(f"  {_inline_format(line)}")
+
+    return "\n".join(result)
+
+
+def _inline_format(text: str) -> str:
+    """Форматирует inline markdown: **bold**, *italic*, `code`, [links]."""
+    import re
+    # Inline code
+    text = re.sub(r'`([^`]+)`', f'{BG_DARK}{CYAN}\\1{RESET}', text)
+    # Bold
+    text = re.sub(r'\*\*([^*]+)\*\*', f'{BOLD}{WHITE}\\1{RESET}', text)
+    # Italic
+    text = re.sub(r'\*([^*]+)\*', f'{ITALIC}\\1{RESET}', text)
+    # Links [text](url)
+    text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', f'{UNDERLINE}{BLUE}\\1{RESET}', text)
+    return text
 
 
 # ─── Конфиг ───────────────────────────────────────────────────────────────────
@@ -352,12 +439,18 @@ class AuroraClient:
             return data.get("content", json.dumps(data, ensure_ascii=False))
         return str(data)
 
-    def send_stream(self, message: str):
-        """Стриминг ответа через SSE. Yields текстовые чанки."""
+    def send_stream(self, message: str, session_id: str = None):
+        """Стриминг ответа через SSE. Yields (type, text) чанки.
+        type: 'reasoning', 'text', 'done', 'error'
+        """
+        payload = {"message": message}
+        if session_id:
+            payload["session_id"] = session_id
         with httpx.stream(
             "POST",
             f"{self.server}/api/send_stream",
-            json={"message": message},
+            json=payload,
+            headers=self._headers(),
             timeout=self.timeout,
         ) as response:
             response.raise_for_status()
@@ -376,10 +469,15 @@ class AuroraClient:
                         except json.JSONDecodeError:
                             continue
                         if data.get("done"):
+                            yield ("done", data.get("elapsed_s", 0))
                             return
-                        text = data.get("text", "")
-                        if text:
-                            yield text
+                        if data.get("error"):
+                            yield ("error", data["error"])
+                            return
+                        if data.get("reasoning"):
+                            yield ("reasoning", data["reasoning"])
+                        if data.get("text"):
+                            yield ("text", data["text"])
 
     def send(self, message: str, session_id: str = None) -> str:
         """POST запрос с поддержкой tools и сессий."""
@@ -929,7 +1027,7 @@ def _handle_local_request(message: str, config: dict) -> str:
 
 
 def send_message(message: str, client: AuroraClient, config: dict = None):
-    """Отправляет сообщение и печатает ответ."""
+    """Отправляет сообщение с real-time streaming и отображением reasoning."""
     import re
 
     original_message = message
@@ -944,34 +1042,7 @@ def send_message(message: str, client: AuroraClient, config: dict = None):
     elif proj and not message.startswith("/"):
         message = f"[Проект: {proj}] {message}"
     else:
-        # Автоматически подхватываем локальные пути из сообщения
         message = _handle_local_request(message, config or {})
-
-    # Анимация "думает" с таймером
-    import threading
-    import time as _time
-    _spin_start = _time.time()
-    stop_spinner = threading.Event()
-    def spinner():
-        frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-        i = 0
-        while not stop_spinner.is_set():
-            elapsed = int(_time.time() - _spin_start)
-            if elapsed < 30:
-                status = "думает..."
-            elif elapsed < 60:
-                status = "использует инструменты..."
-            elif elapsed < 120:
-                status = "работает (сложная задача)..."
-            else:
-                status = "всё ещё работает..."
-            print(f"\r{PURPLE}  {frames[i % len(frames)]} Aurora {status} ({elapsed}с){RESET}    ", end="", flush=True)
-            i += 1
-            stop_spinner.wait(0.1)
-        print(f"\r{' ' * 60}\r", end="", flush=True)
-
-    spin_thread = threading.Thread(target=spinner, daemon=True)
-    spin_thread.start()
 
     try:
         sid = config.get("session_id") if config else None
@@ -988,51 +1059,111 @@ def send_message(message: str, client: AuroraClient, config: dict = None):
                 break
 
         if image_path:
-            # Remove image path from message text
+            # Vision — non-streaming fallback
             clean_msg = message
             for p in image_paths:
                 clean_msg = clean_msg.replace(p, "").strip()
             if not clean_msg:
                 clean_msg = "Что на этом изображении?"
+            print(f"{DIM}  отправляю изображение...{RESET}", flush=True)
             resp = client.send_image(clean_msg, image_path)
-        else:
-            resp = client.send(message, session_id=sid)
+            _print_separator()
+            print(render_markdown(resp))
+            print()
+            vault = config.get("_vault") if config else None
+            if vault:
+                vault.save_message("user", original_message, sid)
+                vault.save_message("assistant", resp, sid)
+            return
+
+        # ── Streaming ответ с real-time отображением ──
+        print(f"{DIM}  Aurora думает...{RESET}", end="", flush=True)
+        full_resp = ""
+        full_reasoning = ""
+        in_reasoning = False
+        reasoning_shown = False
+        text_started = False
+
+        try:
+            for chunk_type, chunk_data in client.send_stream(message, session_id=sid):
+                if chunk_type == "reasoning":
+                    if not reasoning_shown:
+                        print(f"\r{' ' * 50}\r", end="", flush=True)
+                        print(f"  {DIM}{PURPLE}╭─ размышляет ─────────────────────────{RESET}")
+                        reasoning_shown = True
+                        in_reasoning = True
+                    full_reasoning += chunk_data
+                    for ch in chunk_data:
+                        if ch == '\n':
+                            print(f"\n  {DIM}{PURPLE}│{RESET} {DIM}", end="", flush=True)
+                        else:
+                            print(f"{DIM}{ch}{RESET}", end="", flush=True)
+
+                elif chunk_type == "text":
+                    if in_reasoning:
+                        print(f"\n  {DIM}{PURPLE}╰{'─' * 38}{RESET}")
+                        print()
+                        in_reasoning = False
+                    if not text_started:
+                        if not reasoning_shown:
+                            print(f"\r{' ' * 50}\r", end="", flush=True)
+                        _print_separator()
+                        print(f"  {PURPLE}{BOLD}Aurora:{RESET}")
+                        print()
+                        text_started = True
+                    full_resp += chunk_data
+
+                elif chunk_type == "done":
+                    if in_reasoning:
+                        print(f"\n  {DIM}{PURPLE}╰{'─' * 38}{RESET}")
+                    if text_started and full_resp.strip():
+                        # Render collected text with markdown formatting
+                        rendered = render_markdown(full_resp.strip())
+                        print(rendered)
+                    elif not text_started and not reasoning_shown:
+                        print(f"\r{' ' * 50}\r", end="", flush=True)
+                    elapsed = chunk_data
+                    if elapsed:
+                        print(f"\n  {DIM}── {elapsed}с ──{RESET}\n")
+                    else:
+                        print("\n")
+
+                elif chunk_type == "error":
+                    print(f"\r{' ' * 50}\r", end="", flush=True)
+                    print(f"  {RED}Ошибка:{RESET} {chunk_data}\n")
+                    return
+
+        except httpx.ConnectError:
+            print(f"\r{' ' * 50}\r{RED}  Сервер недоступен{RESET}\n")
+            return
+        except httpx.ReadTimeout:
+            print(f"\r{' ' * 50}\r{YELLOW}  Таймаут ответа{RESET}\n")
+            return
+
+        # Filter leaked tool calls from collected text
+        resp = full_resp
+        resp = re.sub(r'<\|tool_call>.*?<tool_call\|>', '', resp, flags=re.DOTALL)
+        resp = re.sub(r'\[\w+\(.*?\)\]', '', resp)
+        resp = re.sub(r'```tool_code\n.*?```', '', resp, flags=re.DOTALL)
+        resp = resp.strip()
 
         vault = config.get("_vault") if config else None
         if vault:
             vault.save_message("user", original_message, sid)
             vault.save_message("assistant", resp, sid)
 
-        stop_spinner.set()
-        spin_thread.join(timeout=1)
-
-        # Filter raw tool call tags and leaked tool syntax
-        resp = re.sub(r'<\|tool_call>.*?<tool_call\|>', '', resp, flags=re.DOTALL)
-        resp = re.sub(r'\[web_search\(.*?\)\]', '', resp)
-        resp = re.sub(r'\[web_fetch\(.*?\)\]', '', resp)
-        resp = re.sub(r'\[\w+\(.*?\)\]', '', resp)
-        resp = re.sub(r'```tool_code\n.*?```', '', resp, flags=re.DOTALL)
-        resp = resp.strip()
-
-        # Handle local_shell — execute commands on user's PC
+        # Handle local_shell
         local_exec_rounds = 0
         while "[LOCAL_EXEC_PENDING]" in resp and local_exec_rounds < 5:
             local_exec_rounds += 1
-            # Extract command and reason
             match = re.search(r'\[LOCAL_EXEC_PENDING\]\s*command=(.*?)\s*reason=(.*?)(?:\n|$)', resp)
             if not match:
                 break
             cmd = match.group(1).strip()
             reason = match.group(2).strip()
 
-            # Clean response — show only text before the marker
-            clean_resp = resp[:resp.index("[LOCAL_EXEC_PENDING]")].strip()
-            if clean_resp:
-                print(f"{PURPLE}{BOLD}Aurora:{RESET} {clean_resp}")
-
-            # Ask user permission
-            print(f"\n  {YELLOW}Aurora хочет выполнить команду на вашем ПК:{RESET}")
-            print(f"  {CYAN}$ {cmd}{RESET}")
+            print(f"\n  {YELLOW}Aurora хочет выполнить команду:{RESET}")
+            print(f"  {BG_DARK} {CYAN}$ {cmd}{RESET} {BG_DARK} {RESET}")
             if reason:
                 print(f"  {DIM}Причина: {reason}{RESET}")
             answer = input(f"  {GREEN}Разрешить? [y/n]: {RESET}").strip().lower()
@@ -1041,7 +1172,6 @@ def send_message(message: str, client: AuroraClient, config: dict = None):
                 print(f"  {DIM}Выполняю...{RESET}")
                 try:
                     import subprocess
-                    # Detect OS and use appropriate shell
                     if sys.platform == "win32":
                         result = subprocess.run(
                             ["powershell", "-Command", cmd],
@@ -1057,79 +1187,56 @@ def send_message(message: str, client: AuroraClient, config: dict = None):
                         output += "\n[STDERR] " + result.stderr.strip()
                     if not output:
                         output = "(команда выполнена, вывод пустой)"
-                    print(f"  {GREEN}Результат:{RESET}\n  {output[:500]}")
+                    print(f"  {GREEN}Результат:{RESET}")
+                    print(f"  {BG_DARK}{GREEN} {output[:500]} {RESET}")
 
-                    # Send result back to Aurora for analysis
-                    followup = f"Результат команды `{cmd}`:\n```\n{output[:2000]}\n```\nКоротко проанализируй и скажи что дальше."
-                    # Spinner for analysis
-                    import threading as _th
-                    _stop = _th.Event()
-                    def _spin():
-                        _f = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
-                        _i = 0
-                        while not _stop.is_set():
-                            print(f"\r{PURPLE}  {_f[_i%10]} Aurora анализирует...{RESET}  ", end="", flush=True)
-                            _i += 1
-                            _stop.wait(0.1)
-                        print(f"\r{' '*40}\r", end="", flush=True)
-                    _t = _th.Thread(target=_spin, daemon=True)
-                    _t.start()
-                    try:
-                        resp = client.send(followup, session_id=sid)
-                    finally:
-                        _stop.set()
-                        _t.join(timeout=1)
+                    followup = f"Результат команды `{cmd}`:\n```\n{output[:2000]}\n```\nКоротко проанализируй."
+                    resp = client.send(followup, session_id=sid)
                     resp = re.sub(r'<\|tool_call>.*?<tool_call\|>', '', resp, flags=re.DOTALL).strip()
                 except subprocess.TimeoutExpired:
                     print(f"  {RED}Таймаут (60 сек){RESET}")
-                    resp = ""
                     break
                 except Exception as e:
                     print(f"  {RED}Ошибка: {e}{RESET}")
-                    resp = ""
                     break
             else:
                 print(f"  {DIM}Отклонено{RESET}")
-                resp = client.send("Пользователь отклонил выполнение команды. Предложи альтернативное решение.", session_id=sid)
+                resp = client.send("Пользователь отклонил выполнение команды.", session_id=sid)
                 resp = re.sub(r'<\|tool_call>.*?<tool_call\|>', '', resp, flags=re.DOTALL).strip()
 
-        print(f"{PURPLE}{BOLD}Aurora:{RESET} ", end="", flush=True)
-
-        # Если локальный проект — проверяем есть ли команды на создание/изменение файлов
+        # Local project file operations
         if lp and resp:
-            # Ищем code blocks с именами файлов
             file_blocks = re.findall(r'`([^`]+\.\w+)`[:\s]*\n```\w*\n([\s\S]*?)```', resp)
             if file_blocks:
                 for fname, content in file_blocks:
                     fname = fname.strip().lstrip('/')
                     if _approve_mode == APPROVE_AUTO:
                         result = lp.write_file(fname, content)
-                        print(f"\n  {GREEN}✓ {fname}{RESET} {DIM}{result}{RESET}")
+                        print(f"  {GREEN}✓ {fname}{RESET} {DIM}{result}{RESET}")
                     else:
-                        print(f"\n  {CYAN}Файл: {fname}{RESET} ({len(content)} символов)")
-                        print(f"  {DIM}Превью: {content[:80].replace(chr(10), ' ')}...{RESET}")
+                        print(f"  {CYAN}Файл: {fname}{RESET} ({len(content)} символов)")
                         answer = input(f"  {GREEN}Применить? [y/n/a(все)]: {RESET}")
                         if answer.lower() in ('a', 'all', 'все'):
                             _approve_mode = APPROVE_AUTO
                             result = lp.write_file(fname, content)
                             print(f"  {GREEN}✓ {result}{RESET}")
-                            print(f"  {DIM}Режим: автоподтверждение{RESET}")
                         elif answer.lower() in ('y', 'да', ''):
                             result = lp.write_file(fname, content)
                             print(f"  {GREEN}✓ {result}{RESET}")
                         else:
                             print(f"  {DIM}Пропущено{RESET}")
 
-        if resp:
-            print(f"{resp}\n")
-        else:
-            print(f"{DIM}(выполняю действие...){RESET}\n")
     except KeyboardInterrupt:
-        stop_spinner.set()
-        print(f"\n{DIM}(прервано){RESET}\n")
+        print(f"\n{DIM}  (прервано){RESET}\n")
     except Exception as e:
-        stop_spinner.set()
-        print(f"\n{RED}Ошибка{RESET}: {e}\n")
+        print(f"\n{RED}  Ошибка{RESET}: {e}\n")
+
+
+def _print_separator():
+    """Печатает разделитель между сообщениями."""
+    cols = shutil.get_terminal_size((80, 24)).columns
+    w = min(cols - 4, 60)
+    print(f"  {DIM}{PURPLE}{'━' * w}{RESET}")
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
