@@ -131,6 +131,21 @@ APPROVE_ASK = "ask"        # Спрашивать каждый раз (по ум
 APPROVE_AUTO = "auto"      # Не спрашивать, применять всё
 _approve_mode = APPROVE_ASK
 
+# Фразы которые включают автономный режим
+_AUTO_PHRASES = [
+    "разрешаю все", "разрешаю всё", "делай без подтверждения",
+    "делай без одобрения", "делай всё сам", "делай все сам",
+    "работай автономно", "автономный режим", "не спрашивай",
+    "полный доступ", "разрешаю выполнять", "можешь делать всё",
+    "можешь делать все", "делай что нужно", "делай что надо",
+    "approve all", "auto mode", "autonomous",
+]
+
+def _check_auto_phrase(message: str) -> bool:
+    """Проверяет содержит ли сообщение фразу включения автономного режима."""
+    msg_lower = message.lower()
+    return any(phrase in msg_lower for phrase in _AUTO_PHRASES)
+
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -573,9 +588,10 @@ def print_help():
   {CYAN}/sessions{RESET}         — список локальных сессий
 
 {BOLD}Режимы подтверждения:{RESET}
-  По умолчанию Aurora спрашивает перед изменением файлов.
-  /approve auto  — применять все изменения без вопросов
+  По умолчанию Aurora спрашивает перед действиями (файлы, команды).
+  /approve auto  — автономный режим (всё без вопросов)
   /approve ask   — спрашивать каждый раз (по умолчанию)
+  Или напиши в чат: "разрешаю всё", "делай без подтверждения" и т.д.
 
 {BOLD}Использование:{RESET}
   aurora               — интерактивный режим
@@ -1029,8 +1045,16 @@ def _handle_local_request(message: str, config: dict) -> str:
 def send_message(message: str, client: AuroraClient, config: dict = None):
     """Отправляет сообщение с real-time streaming и отображением reasoning."""
     import re
+    global _approve_mode
 
     original_message = message
+
+    # Проверяем фразы автономного режима
+    if _check_auto_phrase(message):
+        _approve_mode = APPROVE_AUTO
+        print(f"\n  {GREEN}{BOLD}Автономный режим включён{RESET}")
+        print(f"  {DIM}Aurora будет выполнять действия без подтверждений.{RESET}")
+        print(f"  {DIM}Для отключения: /approve ask{RESET}\n")
 
     # Контекст проекта
     proj = config.get("active_project") if config else None
@@ -1162,11 +1186,15 @@ def send_message(message: str, client: AuroraClient, config: dict = None):
             cmd = match.group(1).strip()
             reason = match.group(2).strip()
 
-            print(f"\n  {YELLOW}Aurora хочет выполнить команду:{RESET}")
+            print(f"\n  {YELLOW}Aurora выполняет команду:{RESET}" if _approve_mode == APPROVE_AUTO else f"\n  {YELLOW}Aurora хочет выполнить команду:{RESET}")
             print(f"  {BG_DARK} {CYAN}$ {cmd}{RESET} {BG_DARK} {RESET}")
             if reason:
                 print(f"  {DIM}Причина: {reason}{RESET}")
-            answer = input(f"  {GREEN}Разрешить? [y/n]: {RESET}").strip().lower()
+
+            if _approve_mode == APPROVE_AUTO:
+                answer = 'y'
+            else:
+                answer = input(f"  {GREEN}Разрешить? [y/n]: {RESET}").strip().lower()
 
             if answer in ('y', 'yes', 'да', ''):
                 print(f"  {DIM}Выполняю...{RESET}")
