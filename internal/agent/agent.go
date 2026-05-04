@@ -58,6 +58,7 @@ type Agent struct {
 	eventCh   chan Event
 	Memory    *memory.Palace
 	SessionID string
+	cancelled bool
 }
 
 // New creates a new agent.
@@ -134,6 +135,7 @@ func (a *Agent) Run(userInput string) {
 	if a.eventCh == nil {
 		a.eventCh = make(chan Event, 100)
 	}
+	a.cancelled = false
 	defer func() {
 		a.SaveSession()
 		a.emit(Event{Type: "done"})
@@ -148,6 +150,9 @@ func (a *Agent) Run(userInput string) {
 	system := buildSystemPrompt(a.config, a.Memory)
 
 	for round := 0; round < MaxToolRounds; round++ {
+		if a.cancelled {
+			return
+		}
 		// Build request
 		req := provider.Request{
 			Model:     a.config.Model,
@@ -362,6 +367,58 @@ func (a *Agent) RestoredMessageCount() int {
 	return len(a.messages)
 }
 
+// Cancel stops the current agent run.
+func (a *Agent) Cancel() {
+	a.cancelled = true
+}
+
+// WorkDir returns the working directory.
+func (a *Agent) WorkDir() string {
+	return a.config.WorkDir
+}
+
+// LoadSession loads a specific session by ID.
+func (a *Agent) LoadSession(id string) {
+	a.SaveSession()
+	s, err := session.Load(id)
+	if err != nil || s == nil {
+		return
+	}
+	a.SessionID = s.ID
+	a.messages = nil
+	for _, raw := range s.Messages {
+		data, _ := json.Marshal(raw)
+		var msg provider.Message
+		json.Unmarshal(data, &msg)
+		a.messages = append(a.messages, msg)
+	}
+}
+
+// ExportMarkdown exports the session as markdown.
+func (a *Agent) ExportMarkdown() string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "# Aurora Session: %s\n\n", a.SessionID)
+	fmt.Fprintf(&sb, "> Exported: %s\n\n", time.Now().Format("2006-01-02 15:04"))
+	for _, m := range a.messages {
+		role := m.Role
+		switch c := m.Content.(type) {
+		case string:
+			fmt.Fprintf(&sb, "## %s\n\n%s\n\n", role, c)
+		case []interface{}:
+			for _, block := range c {
+				if bm, ok := block.(map[string]interface{}); ok {
+					if bm["type"] == "text" {
+						fmt.Fprintf(&sb, "## %s\n\n%s\n\n", role, bm["text"])
+					} else if bm["type"] == "tool_use" {
+						fmt.Fprintf(&sb, "### Tool: %s\n\n```json\n%v\n```\n\n", bm["name"], bm["input"])
+					}
+				}
+			}
+		}
+	}
+	return sb.String()
+}
+
 type toolCall struct {
 	ID        string
 	Name      string
@@ -440,6 +497,16 @@ You have: Bash, Read, Write, Edit, Grep, Glob, RemoteShell.
 
 `)
 	fmt.Fprintf(&sb, "## Environment\n- Working dir: %s\n- Platform: %s\n- Date: %s\n- Shell: Git Bash\n", cfg.WorkDir, platform, now)
+
+	sb.WriteString(`
+## CLI Commands (user types these, not you)
+/new — new session | /sessions — list | /switch ID — load session
+/compact — compress history | /export — save markdown | /import — load
+/memory — show Memory Palace | /remember k=v — save fact
+/clear — clear | /status — stats | /quit — exit
+Ctrl+B sidebar | Ctrl+T sidebar tab | Esc cancel task
+If user asks about commands, explain these.
+`)
 
 	// Project context
 	projectCtx := tools.ProjectContext(cfg.WorkDir)

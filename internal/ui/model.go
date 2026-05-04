@@ -1,8 +1,10 @@
 package ui
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 
 	"github.com/madgodinc/aurora-cli/internal/agent"
 	"github.com/madgodinc/aurora-cli/internal/config"
+	"github.com/madgodinc/aurora-cli/internal/session"
 	"github.com/madgodinc/aurora-cli/internal/tools"
 )
 
@@ -23,6 +26,14 @@ const (
 	StateChat
 )
 
+// SidebarTab controls what sidebar shows
+type SidebarTab int
+
+const (
+	SidebarTools SidebarTab = iota
+	SidebarSessions
+)
+
 type Model struct {
 	version   string
 	state     State
@@ -30,25 +41,25 @@ type Model struct {
 	height    int
 	input     textarea.Model
 	chatView  viewport.Model
-	toolView  viewport.Model
 	ready     bool
 	busy      bool
 	streaming bool
 	streamBuf string
 	startTime time.Time
+	cancelCh  chan struct{} // cancel current task
 
-	// Chat entries (text only)
 	chatLines []string
-	// Tool activity log
-	toolLog []string
+	toolLog   []string
 
 	agent        *agent.Agent
 	cfg          *config.Config
 	inputTokens  int
 	outputTokens int
 	msgCount     int
+
 	showSidebar  bool
 	sidebarWidth int
+	sidebarTab   SidebarTab
 }
 
 type agentEventMsg agent.Event
@@ -66,13 +77,26 @@ func NewModel(version string, cfg *config.Config) Model {
 		SSHAlias: cfg.SSHAlias,
 	}
 	ag := agent.New(agCfg)
+
+	// Show restored session info
+	restored := ag.RestoredMessageCount()
+	var chatLines []string
+	if restored > 0 {
+		chatLines = append(chatLines,
+			DimStyle.Render(fmt.Sprintf("  Session restored: %s (%d messages)", ag.SessionID, restored)),
+			"",
+		)
+	}
+
 	return Model{
 		version:      version,
 		state:        StateLanding,
 		agent:        ag,
 		cfg:          cfg,
-		sidebarWidth: 24,
+		sidebarWidth: 28,
 		showSidebar:  true,
+		sidebarTab:   SidebarTools,
+		chatLines:    chatLines,
 	}
 }
 
@@ -88,12 +112,10 @@ func listenAgent(ch <-chan agent.Event) tea.Cmd {
 	}
 }
 
-// ─── Layout constants ───
 const (
-	logoHeight    = 4
-	toolPanelH    = 10  // tool activity panel height
-	inputHeight   = 4
-	headerHeight  = 1   // status bar
+	toolPanelH   = 8
+	inputHeight  = 4
+	headerHeight = 1
 )
 
 // ─── UPDATE ─────────────────────────────────────────────────────────────────
@@ -105,15 +127,54 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c":
+			if m.busy {
+				// Cancel current task
+				if m.cancelCh != nil {
+					close(m.cancelCh)
+					m.cancelCh = nil
+				}
+				m.agent.Cancel()
+				m.busy = false
+				m.streaming = false
+				m.chatLines = append(m.chatLines, ToolErrorStyle.Render("  ✗ Cancelled"), "")
+				m.toolLog = append(m.toolLog, ToolErrorStyle.Render("✗ CANCELLED"))
+				m.refreshChat()
+				return m, nil
+			}
+			m.agent.SaveSession()
 			return m, tea.Quit
+
 		case "esc":
 			if m.state == StateLanding {
 				return m, tea.Quit
 			}
+			if m.busy {
+				if m.cancelCh != nil {
+					close(m.cancelCh)
+					m.cancelCh = nil
+				}
+				m.agent.Cancel()
+				m.busy = false
+				m.streaming = false
+				m.chatLines = append(m.chatLines, ToolErrorStyle.Render("  ✗ Stopped"), "")
+				m.refreshChat()
+				return m, nil
+			}
+
 		case "ctrl+b":
 			m.showSidebar = !m.showSidebar
 			m.relayout()
 			return m, nil
+
+		case "ctrl+t":
+			// Toggle sidebar tab
+			if m.sidebarTab == SidebarTools {
+				m.sidebarTab = SidebarSessions
+			} else {
+				m.sidebarTab = SidebarTools
+			}
+			return m, nil
+
 		case "enter":
 			if m.state == StateLanding {
 				m.state = StateChat
@@ -146,7 +207,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamBuf = ""
 			m.startTime = time.Now()
 			m.msgCount++
-			m.toolLog = nil // clear tool log for new turn
+			m.toolLog = nil
+			m.cancelCh = make(chan struct{})
 
 			ch := m.agent.Events()
 			go m.agent.Run(val)
@@ -167,27 +229,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.finalizeStream()
 			}
 			preview := ev.ToolInput
-			if preview == "" {
-				preview = ""
-			}
 			if len(preview) > 50 {
 				preview = preview[:50] + "..."
 			}
 			m.toolLog = append(m.toolLog, ToolStyle.Render("⚡ "+ev.ToolName)+" "+DimStyle.Render(preview))
-			m.refreshToolView()
 
 		case "tool_done":
-			result := ev.ToolResult
+			result := strings.ReplaceAll(ev.ToolResult, "\n", " ")
 			if len(result) > 60 {
 				result = result[:60] + "..."
 			}
-			result = strings.ReplaceAll(result, "\n", " ")
 			m.toolLog = append(m.toolLog, ToolDoneStyle.Render("✓ "+ev.ToolName)+" "+DimStyle.Render(result))
-			m.refreshToolView()
 
 		case "error":
 			m.toolLog = append(m.toolLog, ToolErrorStyle.Render("✗ "+ev.Text))
-			m.refreshToolView()
 
 		case "tokens":
 			m.inputTokens += ev.InputTokens
@@ -202,6 +257,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.chatLines = append(m.chatLines, DimStyle.Render(fmt.Sprintf("  %.1fs", elapsed)), "")
 			}
 			m.busy = false
+			m.cancelCh = nil
 			m.refreshChat()
 			return m, nil
 		}
@@ -213,7 +269,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-
 		if !m.ready {
 			m.initLayout()
 			m.ready = true
@@ -245,7 +300,7 @@ func (m *Model) mainWidth() int {
 }
 
 func (m *Model) chatHeight() int {
-	h := m.height - headerHeight - toolPanelH - inputHeight - 2 // borders/separators
+	h := m.height - headerHeight - toolPanelH - inputHeight - 2
 	if h < 5 {
 		h = 5
 	}
@@ -255,12 +310,9 @@ func (m *Model) chatHeight() int {
 func (m *Model) initLayout() {
 	mw := m.mainWidth()
 	ch := m.chatHeight()
-
 	m.chatView = viewport.New(viewport.WithWidth(mw), viewport.WithHeight(ch))
-	m.toolView = viewport.New(viewport.WithWidth(mw/2), viewport.WithHeight(toolPanelH-2))
-
 	ta := textarea.New()
-	ta.Placeholder = "Message Aurora..."
+	ta.Placeholder = "Message Aurora... (Esc to cancel)"
 	ta.Focus()
 	ta.CharLimit = 10000
 	ta.SetWidth(mw - 4)
@@ -274,27 +326,19 @@ func (m *Model) relayout() {
 	ch := m.chatHeight()
 	m.chatView.SetWidth(mw)
 	m.chatView.SetHeight(ch)
-	m.toolView.SetWidth(mw / 2)
-	m.toolView.SetHeight(toolPanelH - 2)
 	m.input.SetWidth(mw - 4)
 	m.refreshChat()
-	m.refreshToolView()
 }
 
 func (m *Model) updateStreamLine() {
-	// Find or append streaming line
 	marker := "♥ Aurora: "
 	found := false
 	for i := len(m.chatLines) - 1; i >= 0; i-- {
-		if strings.Contains(m.chatLines[i], marker) || strings.Contains(m.chatLines[i], "aurora_stream_marker") {
-			m.chatLines[i] = AuroraNameStyle.Render(marker) + m.streamBuf
-			if m.busy {
-				m.chatLines[i] += DimStyle.Render(" ●")
-			}
+		if strings.Contains(m.chatLines[i], marker) {
+			m.chatLines[i] = AuroraNameStyle.Render(marker) + m.streamBuf + DimStyle.Render(" ●")
 			found = true
 			break
 		}
-		// Stop looking past user messages
 		if strings.Contains(m.chatLines[i], "♥ You:") {
 			break
 		}
@@ -310,14 +354,13 @@ func (m *Model) finalizeStream() {
 	}
 	marker := "♥ Aurora: "
 	rendered := renderMarkdown(m.streamBuf)
+	border := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(Pink).
+		Padding(0, 1).
+		MaxWidth(m.mainWidth() - 4)
 	for i := len(m.chatLines) - 1; i >= 0; i-- {
 		if strings.Contains(m.chatLines[i], marker) {
-			// Replace with rendered markdown in a border box
-			border := lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(Pink).
-				Padding(0, 1).
-				MaxWidth(m.mainWidth() - 4)
 			m.chatLines[i] = AuroraNameStyle.Render("♥ Aurora") + "\n" + border.Render(rendered)
 			break
 		}
@@ -332,16 +375,7 @@ func (m *Model) refreshChat() {
 	m.chatView.GotoBottom()
 }
 
-func (m *Model) refreshToolView() {
-	// Show last N tool log entries that fit
-	maxLines := toolPanelH - 2
-	start := 0
-	if len(m.toolLog) > maxLines {
-		start = len(m.toolLog) - maxLines
-	}
-	m.toolView.SetContent(strings.Join(m.toolLog[start:], "\n"))
-	m.toolView.GotoBottom()
-}
+// ─── COMMANDS ───────────────────────────────────────────────────────────────
 
 func (m *Model) handleCommand(input string) string {
 	parts := strings.Fields(input)
@@ -352,30 +386,115 @@ func (m *Model) handleCommand(input string) string {
 	}
 	switch cmd {
 	case "/help":
-		return `Commands: /help /compact /memory /remember /clear /status /quit (Ctrl+B sidebar)`
+		return `Commands:
+ /new           — new session
+ /sessions      — list sessions
+ /switch ID     — switch to session
+ /compact       — compress history
+ /export [file] — export session to markdown
+ /import file   — import session from file
+ /memory        — show Memory Palace
+ /remember k=v  — save to memory
+ /clear         — clear display
+ /status        — show stats
+ /quit          — save & exit
+ Ctrl+B sidebar | Ctrl+T tab | Esc cancel`
+
 	case "/quit", "/exit", "/q":
 		m.agent.SaveSession()
 		return "quit"
+
 	case "/new":
 		m.agent.NewSession()
 		m.chatLines = nil
 		m.toolLog = nil
-		return "New session started."
+		m.inputTokens = 0
+		m.outputTokens = 0
+		m.msgCount = 0
+		return fmt.Sprintf("New session: %s", m.agent.SessionID)
+
+	case "/sessions":
+		sessions := session.List()
+		if len(sessions) == 0 {
+			return "No sessions."
+		}
+		var lines []string
+		for _, s := range sessions {
+			marker := ""
+			if s.ID == m.agent.SessionID {
+				marker = " ●"
+			}
+			dir := filepath.Base(s.WorkDir)
+			lines = append(lines, fmt.Sprintf(" %s  %s  %d msgs  %s%s",
+				s.Updated.Format("01-02 15:04"), s.ID[:15], len(s.Messages), dir, marker))
+		}
+		return strings.Join(lines, "\n")
+
+	case "/switch":
+		if arg == "" {
+			return "/switch SESSION_ID"
+		}
+		// Find session matching prefix
+		sessions := session.List()
+		for _, s := range sessions {
+			if strings.HasPrefix(s.ID, arg) {
+				m.agent.SaveSession()
+				m.agent.LoadSession(s.ID)
+				m.chatLines = []string{DimStyle.Render(fmt.Sprintf("  Switched to session: %s (%d messages)", s.ID, len(s.Messages))), ""}
+				m.toolLog = nil
+				return ""
+			}
+		}
+		return "Session not found: " + arg
+
 	case "/compact":
-		return m.agent.Compact()
+		result := m.agent.Compact()
+		m.agent.SaveSession()
+		return result
+
+	case "/export":
+		fname := arg
+		if fname == "" {
+			fname = fmt.Sprintf("aurora_session_%s.md", time.Now().Format("20060102_150405"))
+		}
+		md := m.agent.ExportMarkdown()
+		if err := os.WriteFile(fname, []byte(md), 0644); err != nil {
+			return "Export error: " + err.Error()
+		}
+		return "Exported to: " + fname
+
+	case "/import":
+		if arg == "" {
+			return "/import filename.json"
+		}
+		data, err := os.ReadFile(arg)
+		if err != nil {
+			return "Read error: " + err.Error()
+		}
+		var s session.Session
+		if err := json.Unmarshal(data, &s); err != nil {
+			return "Parse error: " + err.Error()
+		}
+		session.Save(&s)
+		return fmt.Sprintf("Imported session %s (%d messages)", s.ID, len(s.Messages))
+
 	case "/clear":
 		m.chatLines = nil
 		m.toolLog = nil
 		return ""
+
 	case "/status":
-		return fmt.Sprintf("Msgs: %d | Tokens: %d↑ %d↓ | Memory: %d | Tools: %d",
-			m.msgCount, m.inputTokens, m.outputTokens, m.agent.Memory.Count(), tools.ToolCount(m.cfg.HasSSH))
+		return fmt.Sprintf("Session: %s\nMsgs: %d | Tokens: %d↑ %d↓ | Memory: %d | Tools: %d\nDir: %s",
+			m.agent.SessionID, m.msgCount, m.inputTokens, m.outputTokens,
+			m.agent.Memory.Count(), tools.ToolCount(m.cfg.HasSSH), m.agent.WorkDir())
+
 	case "/memory":
 		mem := m.agent.Memory.RecallAll()
 		if mem == "" {
 			return "Memory Palace is empty."
 		}
 		return mem
+
 	case "/remember":
 		if arg == "" {
 			return "/remember key = value"
@@ -387,8 +506,9 @@ func (m *Model) handleCommand(input string) string {
 		}
 		m.agent.Memory.AddFact(arg)
 		return "Fact saved."
+
 	default:
-		return "Unknown: " + cmd
+		return "Unknown: " + cmd + " (/help)"
 	}
 }
 
@@ -415,16 +535,26 @@ func (m Model) viewLanding() string {
 	ver := SubtitleStyle.Render(fmt.Sprintf("v%s", m.version))
 	status := lipgloss.NewStyle().Foreground(Green).Render("● brain::online")
 	tc := tools.ToolCount(m.cfg.HasSSH)
+	restored := m.agent.RestoredMessageCount()
 	info := DimStyle.Render(fmt.Sprintf("   Model: Qwen3.6-27B  |  Tools: %d  |  User: %s", tc, m.cfg.Username))
+	sessionInfo := ""
+	if restored > 0 {
+		sessionInfo = DimStyle.Render(fmt.Sprintf("   Session: %s (%d messages)", m.agent.SessionID[:15], restored))
+	}
 	enter := DimStyle.Render("\n   Press ENTER to start  ·  ESC to quit")
-	content := lipgloss.JoinVertical(lipgloss.Left, b, "", ver, "   "+status, info, enter)
+	parts := []string{b, "", ver, "   " + status, info}
+	if sessionInfo != "" {
+		parts = append(parts, sessionInfo)
+	}
+	parts = append(parts, enter)
+	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
 }
 
 func (m Model) viewChat() string {
 	mw := m.mainWidth()
 
-	// ── Top bar: Logo + Tool Activity ──
+	// ── Top: Logo + Tool Activity ──
 	logoW := 16
 	toolPanelW := mw - logoW - 1
 
@@ -436,7 +566,6 @@ func (m Model) viewChat() string {
 		BorderForeground(PinkMuted).
 		Render("♥ AURORA")
 
-	// Tool activity panel
 	toolBorder := lipgloss.NewStyle().
 		Width(toolPanelW).Height(toolPanelH).
 		Border(lipgloss.RoundedBorder()).
@@ -449,7 +578,7 @@ func (m Model) viewChat() string {
 		if m.busy {
 			toolContent = DimStyle.Render("  thinking...")
 		} else {
-			toolContent = DimStyle.Render("  waiting for task...")
+			toolContent = DimStyle.Render("  ready")
 		}
 	} else {
 		maxShow := toolPanelH - 3
@@ -460,18 +589,15 @@ func (m Model) viewChat() string {
 		toolContent = strings.Join(m.toolLog[start:], "\n")
 	}
 	toolPanel := toolBorder.Render(toolTitle + "\n" + toolContent)
-
-	// Make logo same height as tool panel
 	logoStyled := lipgloss.NewStyle().Height(toolPanelH).Render(logo)
-
 	topBar := lipgloss.JoinHorizontal(lipgloss.Top, logoStyled, " ", toolPanel)
 
 	// ── Status line ──
 	busyStr := ""
 	if m.busy {
-		busyStr = " ⟳"
+		busyStr = " ⟳ Esc=cancel"
 	}
-	statusText := fmt.Sprintf(" ♥ v%s │ %s │ %d↑ %d↓%s │ Mem: %d │ Ctrl+B ",
+	statusText := fmt.Sprintf(" ♥ v%s │ %s │ %d↑ %d↓%s │ Mem:%d │ Ctrl+B Ctrl+T ",
 		m.version, m.cfg.Username, m.inputTokens, m.outputTokens, busyStr, m.agent.Memory.Count())
 	statusLine := StatusBarStyle.Width(mw).Render(statusText)
 
@@ -486,14 +612,7 @@ func (m Model) viewChat() string {
 	}
 	inputLine := promptIcon + m.input.View()
 
-	// ── Main column ──
-	mainCol := lipgloss.JoinVertical(lipgloss.Left,
-		topBar,
-		statusLine,
-		chatContent,
-		sep,
-		inputLine,
-	)
+	mainCol := lipgloss.JoinVertical(lipgloss.Left, topBar, statusLine, chatContent, sep, inputLine)
 
 	// ── Sidebar ──
 	if m.showSidebar {
@@ -508,16 +627,24 @@ func (m Model) viewChat() string {
 
 func (m Model) renderSidebar() string {
 	w := m.sidebarWidth - 2
+	sep := DimStyle.Render(strings.Repeat("─", w))
 
+	switch m.sidebarTab {
+	case SidebarSessions:
+		return m.renderSessionsSidebar(w, sep)
+	default:
+		return m.renderToolsSidebar(w, sep)
+	}
+}
+
+func (m Model) renderToolsSidebar(w int, sep string) string {
 	title := lipgloss.NewStyle().Foreground(Pink).Bold(true).
-		Width(w).Align(lipgloss.Center).Render("♥ Tools")
+		Width(w).Align(lipgloss.Center).Render("♥ Tools [Ctrl+T]")
 
 	var toolLines []string
 	for _, t := range tools.Registry(m.cfg.HasSSH) {
 		toolLines = append(toolLines, DimStyle.Render(" "+t.Def.Name))
 	}
-
-	sep := DimStyle.Render(strings.Repeat("─", w))
 
 	memTitle := lipgloss.NewStyle().Foreground(Pink).Bold(true).
 		Width(w).Align(lipgloss.Center).Render("♥ Memory")
@@ -529,6 +656,7 @@ func (m Model) renderSidebar() string {
 		DimStyle.Render(" " + m.cfg.Username),
 		DimStyle.Render(" Qwen3.6-27B"),
 		DimStyle.Render(fmt.Sprintf(" %d msgs", m.msgCount)),
+		DimStyle.Render(" " + m.agent.SessionID[:min(15, len(m.agent.SessionID))]),
 	}
 	if m.cfg.HasSSH {
 		info = append(info, lipgloss.NewStyle().Foreground(Green).Render(" ● "+m.cfg.SSHAlias))
@@ -536,10 +664,64 @@ func (m Model) renderSidebar() string {
 
 	parts := []string{"", title, ""}
 	parts = append(parts, toolLines...)
-	parts = append(parts, "", sep, "", memTitle, memCount)
-	parts = append(parts, "", sep, "", infoTitle)
+	parts = append(parts, "", sep, "", memTitle, memCount, "", sep, "", infoTitle)
 	parts = append(parts, info...)
 
 	return lipgloss.NewStyle().Width(m.sidebarWidth).Height(m.height - 1).
 		Render(strings.Join(parts, "\n"))
+}
+
+func (m Model) renderSessionsSidebar(w int, sep string) string {
+	title := lipgloss.NewStyle().Foreground(Pink).Bold(true).
+		Width(w).Align(lipgloss.Center).Render("♥ Sessions [Ctrl+T]")
+
+	sessions := session.List()
+	var lines []string
+	for _, s := range sessions {
+		marker := " "
+		if s.ID == m.agent.SessionID {
+			marker = "●"
+		}
+		id := s.ID
+		if len(id) > 12 {
+			id = id[:12]
+		}
+		dir := filepath.Base(s.WorkDir)
+		if len(dir) > 10 {
+			dir = dir[:10]
+		}
+		line := fmt.Sprintf("%s %s %dm %s", marker, id, len(s.Messages), dir)
+		if s.ID == m.agent.SessionID {
+			lines = append(lines, lipgloss.NewStyle().Foreground(Pink).Render(line))
+		} else {
+			lines = append(lines, DimStyle.Render(line))
+		}
+	}
+	if len(lines) == 0 {
+		lines = append(lines, DimStyle.Render(" no sessions"))
+	}
+
+	helpLines := []string{
+		"",
+		sep,
+		DimStyle.Render(" /new      new"),
+		DimStyle.Render(" /switch   load"),
+		DimStyle.Render(" /export   save md"),
+		DimStyle.Render(" /import   load"),
+		DimStyle.Render(" /compact  compress"),
+	}
+
+	parts := []string{"", title, ""}
+	parts = append(parts, lines...)
+	parts = append(parts, helpLines...)
+
+	return lipgloss.NewStyle().Width(m.sidebarWidth).Height(m.height - 1).
+		Render(strings.Join(parts, "\n"))
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
