@@ -2,6 +2,7 @@ package tools
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -13,6 +14,23 @@ import (
 
 // SSHHost is the SSH alias for remote server. Set by agent on init.
 var SSHHost = "brain"
+
+// BashWorkDir tracks the current directory for Bash commands.
+// Updated when Aurora uses `cd` in commands.
+var BashWorkDir = ""
+
+func getWorkDir() string {
+	if BashWorkDir != "" {
+		return BashWorkDir
+	}
+	wd, _ := os.Getwd()
+	return wd
+}
+
+// SetBashWorkDir sets the working directory for Bash commands.
+func SetBashWorkDir(dir string) {
+	BashWorkDir = dir
+}
 
 // Track child processes for cleanup
 var (
@@ -95,6 +113,7 @@ func executeBash(input map[string]interface{}) string {
 	} else {
 		cmd = exec.Command("bash", "-c", command)
 	}
+	cmd.Dir = getWorkDir()
 
 	trackChild(cmd)
 	defer untrackChild(cmd)
