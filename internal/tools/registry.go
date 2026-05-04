@@ -28,7 +28,12 @@ func Registry(hasSSH bool) []Tool {
 		// System
 		ClipboardTool(),
 		ProcessTool(),
-		// Memory — always available
+		// Code
+		MultiEditTool(),
+		RunTestTool(),
+		TreeTool(),
+		DiffTool(),
+		// Memory
 		RememberTool(),
 	}
 
