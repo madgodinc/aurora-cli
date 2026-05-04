@@ -69,7 +69,9 @@ func Load() *Config {
 	cfg.HasSSH = checkSSH()
 	cfg.IsOwner = cfg.HasSSH
 
-	// If local network, set backend URL to direct brain
+	// Backend URL = same as proxy (auth routes proxied)
+	cfg.BackendURL = cfg.ProxyURL
+	// For local network, use direct backend for faster auth
 	if strings.Contains(cfg.ProxyURL, "192.168.0.100") {
 		cfg.BackendURL = "http://192.168.0.100:8080"
 	}
@@ -182,7 +184,9 @@ func RunSetup() *Config {
 
 func doTelegramAuth(backendURL string) (token, username string, userID int) {
 	// 1. Get auth code
-	resp, err := http.Post(backendURL+"/api/auth/cli/start", "application/json", nil)
+	req, _ := http.NewRequest("POST", backendURL+"/api/auth/cli/start", nil)
+	req.Header.Set("x-api-key", "aurora-brain-2026")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		fmt.Printf("  Error: %v\n", err)
 		return "", "", 0
@@ -214,7 +218,9 @@ func doTelegramAuth(backendURL string) (token, username string, userID int) {
 		time.Sleep(5 * time.Second)
 		fmt.Print(".")
 
-		pollResp, err := client.Get(fmt.Sprintf("%s/api/auth/cli/poll?code=%s", backendURL, startData.Code))
+		pollReq, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/auth/cli/poll?code=%s", backendURL, startData.Code), nil)
+		pollReq.Header.Set("x-api-key", "aurora-brain-2026")
+		pollResp, err := client.Do(pollReq)
 		if err != nil {
 			continue
 		}
