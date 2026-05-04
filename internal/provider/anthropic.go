@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // Config holds provider configuration.
@@ -79,7 +80,9 @@ type Client struct {
 func NewClient(cfg Config) *Client {
 	return &Client{
 		config: cfg,
-		http:   &http.Client{},
+		http: &http.Client{
+			Timeout: 5 * time.Minute,
+		},
 	}
 }
 

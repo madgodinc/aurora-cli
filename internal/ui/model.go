@@ -402,6 +402,14 @@ func (m *Model) handleCommand(input string) string {
 
 	case "/quit", "/exit", "/q":
 		m.agent.SaveSession()
+		// Auto-save session summary to memory
+		if m.msgCount > 0 {
+			summary := fmt.Sprintf("Session %s in %s, %d messages, %d+%d tokens, %s",
+				m.agent.SessionID, filepath.Base(m.agent.WorkDir()),
+				m.msgCount, m.inputTokens, m.outputTokens,
+				time.Now().Format("2006-01-02 15:04"))
+			m.agent.Memory.SaveSummary(summary)
+		}
 		return "quit"
 
 	case "/new":
