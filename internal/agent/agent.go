@@ -141,6 +141,11 @@ func (a *Agent) Run(userInput string) {
 		a.emit(Event{Type: "done"})
 	}()
 
+	// Auto-compact if too many messages
+	if len(a.messages) > 50 {
+		a.Compact()
+	}
+
 	// Add user message
 	a.messages = append(a.messages, provider.Message{
 		Role:    "user",

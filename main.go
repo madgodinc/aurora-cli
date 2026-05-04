@@ -15,7 +15,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-const version = "0.2.0"
+const version = "0.3.1"
 
 func main() {
 	defer tools.CleanupChildren()
