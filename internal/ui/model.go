@@ -354,7 +354,13 @@ func (m *Model) handleCommand(input string) string {
 	case "/help":
 		return `Commands: /help /compact /memory /remember /clear /status /quit (Ctrl+B sidebar)`
 	case "/quit", "/exit", "/q":
+		m.agent.SaveSession()
 		return "quit"
+	case "/new":
+		m.agent.NewSession()
+		m.chatLines = nil
+		m.toolLog = nil
+		return "New session started."
 	case "/compact":
 		return m.agent.Compact()
 	case "/clear":

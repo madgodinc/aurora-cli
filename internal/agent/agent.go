@@ -11,6 +11,7 @@ import (
 
 	"github.com/madgodinc/aurora-cli/internal/memory"
 	"github.com/madgodinc/aurora-cli/internal/provider"
+	"github.com/madgodinc/aurora-cli/internal/session"
 	"github.com/madgodinc/aurora-cli/internal/tools"
 )
 
@@ -50,12 +51,13 @@ type Event struct {
 
 // Agent manages the conversation and tool loop.
 type Agent struct {
-	config   Config
-	client   *provider.Client
-	messages []provider.Message
-	toolDefs []provider.ToolDef
-	eventCh  chan Event
-	Memory   *memory.Palace
+	config    Config
+	client    *provider.Client
+	messages  []provider.Message
+	toolDefs  []provider.ToolDef
+	eventCh   chan Event
+	Memory    *memory.Palace
+	SessionID string
 }
 
 // New creates a new agent.
@@ -101,6 +103,9 @@ func New(cfg Config) *Agent {
 		return "Unknown action"
 	}
 
+	// Try to restore last session for this directory
+	ag.restoreSession()
+
 	return ag
 }
 
@@ -130,6 +135,7 @@ func (a *Agent) Run(userInput string) {
 		a.eventCh = make(chan Event, 100)
 	}
 	defer func() {
+		a.SaveSession()
 		a.emit(Event{Type: "done"})
 	}()
 
@@ -306,6 +312,54 @@ func (a *Agent) Compact() string {
 		a.messages[len(a.messages)-keep:]...,
 	)
 	return fmt.Sprintf("Compacted %d messages.", len(old))
+}
+
+func (a *Agent) restoreSession() {
+	s := session.FindLatest(a.config.WorkDir)
+	if s == nil || len(s.Messages) == 0 {
+		a.SessionID = session.NewID(a.config.WorkDir)
+		return
+	}
+	a.SessionID = s.ID
+	// Restore messages from session
+	for _, raw := range s.Messages {
+		data, _ := json.Marshal(raw)
+		var msg provider.Message
+		json.Unmarshal(data, &msg)
+		a.messages = append(a.messages, msg)
+	}
+}
+
+// SaveSession persists current conversation to disk.
+func (a *Agent) SaveSession() {
+	if len(a.messages) == 0 {
+		return
+	}
+	var rawMsgs []map[string]interface{}
+	for _, m := range a.messages {
+		data, _ := json.Marshal(m)
+		var raw map[string]interface{}
+		json.Unmarshal(data, &raw)
+		rawMsgs = append(rawMsgs, raw)
+	}
+	s := &session.Session{
+		ID:       a.SessionID,
+		WorkDir:  a.config.WorkDir,
+		Messages: rawMsgs,
+	}
+	session.Save(s)
+}
+
+// NewSession starts a fresh session, saving the old one.
+func (a *Agent) NewSession() {
+	a.SaveSession()
+	a.messages = nil
+	a.SessionID = session.NewID(a.config.WorkDir)
+}
+
+// RestoredMessageCount returns how many messages were restored from session.
+func (a *Agent) RestoredMessageCount() int {
+	return len(a.messages)
 }
 
 type toolCall struct {

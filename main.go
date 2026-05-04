@@ -43,6 +43,9 @@ func main() {
 		cfg = config.RunSetup()
 	}
 
+	// Check for updates (non-blocking, max every 6h)
+	config.CheckForUpdate(version)
+
 	// Non-interactive mode
 	if len(os.Args) > 2 && (os.Args[1] == "-p" || os.Args[1] == "--print") {
 		prompt := strings.Join(os.Args[2:], " ")
