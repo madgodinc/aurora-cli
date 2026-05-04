@@ -1,0 +1,6 @@
+{
+  "proxy_url": "http://192.168.0.100:8082",
+  "api_key": "aurora-brain-2026",
+  "model": "claude-sonnet-4-20250514",
+  "version": "0.1.0"
+}
