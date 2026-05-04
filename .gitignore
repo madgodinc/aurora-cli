@@ -1,0 +1,17 @@
+# Binaries
+*.exe
+*.exe~
+*.bin
+
+# Go build cache
+go.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
