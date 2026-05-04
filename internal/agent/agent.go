@@ -372,6 +372,11 @@ func (a *Agent) RestoredMessageCount() int {
 	return len(a.messages)
 }
 
+// SetWorkDir changes the working directory.
+func (a *Agent) SetWorkDir(dir string) {
+	a.config.WorkDir = dir
+}
+
 // Cancel stops the current agent run.
 func (a *Agent) Cancel() {
 	a.cancelled = true

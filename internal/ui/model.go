@@ -507,6 +507,19 @@ func (m *Model) handleCommand(input string) string {
 		m.agent.Memory.AddFact(arg)
 		return "Fact saved."
 
+	case "/cd":
+		if arg == "" {
+			return "Dir: " + m.agent.WorkDir()
+		}
+		info, err := os.Stat(arg)
+		if err != nil || !info.IsDir() {
+			return "Not a directory: " + arg
+		}
+		abs, _ := filepath.Abs(arg)
+		os.Chdir(abs)
+		m.agent.SetWorkDir(abs)
+		return "Dir: " + abs
+
 	default:
 		return "Unknown: " + cmd + " (/help)"
 	}
