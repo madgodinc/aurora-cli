@@ -23,6 +23,7 @@ func Registry(hasSSH bool) []Tool {
 		// Web
 		WebSearchTool(),
 		WebFetchTool(),
+		DownloadTool(),
 		// Dev
 		GitTool(),
 		// System
