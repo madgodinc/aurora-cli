@@ -82,6 +82,9 @@ func New(cfg Config) *Agent {
 		tools.SSHHost = cfg.SSHAlias
 	}
 
+	// Configure sub-agent
+	tools.SetSubagentConfig(cfg.ProxyURL, cfg.APIKey, cfg.Model)
+
 	// Connect Remember tool to Memory Palace
 	tools.MemoryCallback = func(action, category, key, value string) string {
 		switch action {

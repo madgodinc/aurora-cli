@@ -33,6 +33,8 @@ func Registry(hasSSH bool) []Tool {
 		RunTestTool(),
 		TreeTool(),
 		DiffTool(),
+		// Agent
+		AgentTool(),
 		// Memory
 		RememberTool(),
 	}
