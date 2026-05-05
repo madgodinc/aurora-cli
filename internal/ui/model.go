@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
@@ -60,6 +61,17 @@ type Model struct {
 	showSidebar  bool
 	sidebarWidth int
 	sidebarTab   SidebarTab
+
+	// Spinner
+	spin       spinner.Model
+	spinActive bool
+
+	// History search (Ctrl+R)
+	inputHistory []string
+	historyIdx   int
+
+	// Theme
+	theme string // "pink", "cyber", "dark"
 }
 
 type agentEventMsg agent.Event
@@ -88,6 +100,11 @@ func NewModel(version string, cfg *config.Config) Model {
 		)
 	}
 
+	sp := spinner.New(
+		spinner.WithSpinner(spinner.Dot),
+		spinner.WithStyle(lipgloss.NewStyle().Foreground(Pink)),
+	)
+
 	return Model{
 		version:      version,
 		state:        StateLanding,
@@ -97,6 +114,9 @@ func NewModel(version string, cfg *config.Config) Model {
 		showSidebar:  true,
 		sidebarTab:   SidebarTools,
 		chatLines:    chatLines,
+		spin:         sp,
+		historyIdx:   -1,
+		theme:        "pink",
 	}
 }
 
@@ -167,13 +187,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "ctrl+t":
-			// Toggle sidebar tab
 			if m.sidebarTab == SidebarTools {
 				m.sidebarTab = SidebarSessions
 			} else {
 				m.sidebarTab = SidebarTools
 			}
 			return m, nil
+
+		case "up":
+			// Input history navigation
+			if m.state == StateChat && !m.busy && len(m.inputHistory) > 0 {
+				if m.historyIdx < len(m.inputHistory)-1 {
+					m.historyIdx++
+				}
+				m.input.Reset()
+				m.input.SetValue(m.inputHistory[len(m.inputHistory)-1-m.historyIdx])
+				return m, nil
+			}
+
+		case "down":
+			if m.state == StateChat && !m.busy && m.historyIdx >= 0 {
+				m.historyIdx--
+				if m.historyIdx < 0 {
+					m.input.Reset()
+				} else {
+					m.input.SetValue(m.inputHistory[len(m.inputHistory)-1-m.historyIdx])
+				}
+				return m, nil
+			}
 
 		case "enter":
 			if m.state == StateLanding {
@@ -200,9 +241,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
+			m.inputHistory = append(m.inputHistory, val)
+			m.historyIdx = -1
 			m.chatLines = append(m.chatLines, PromptStyle.Render("♥ You: ")+val, "")
 			m.input.Reset()
 			m.busy = true
+			m.spinActive = true
 			m.streaming = false
 			m.streamBuf = ""
 			m.startTime = time.Now()
@@ -213,7 +257,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ch := m.agent.Events()
 			go m.agent.Run(val)
 			m.refreshChat()
-			return m, listenAgent(ch)
+			return m, tea.Batch(listenAgent(ch), m.spin.Tick)
 		}
 
 	case agentEventMsg:
@@ -257,6 +301,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.chatLines = append(m.chatLines, DimStyle.Render(fmt.Sprintf("  %.1fs", elapsed)), "")
 			}
 			m.busy = false
+			m.spinActive = false
 			m.cancelCh = nil
 			m.refreshChat()
 			return m, nil
@@ -265,6 +310,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshChat()
 		ch := m.agent.Events()
 		return m, listenAgent(ch)
+
+	case spinner.TickMsg:
+		if m.spinActive {
+			var cmd tea.Cmd
+			m.spin, cmd = m.spin.Update(msg)
+			return m, cmd
+		}
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -578,6 +630,24 @@ Other:
 		}
 		return t.Execute(map[string]interface{}{"mode": mode})
 
+	case "/theme":
+		switch arg {
+		case "pink":
+			m.theme = "pink"
+			applyTheme("pink")
+			return "Theme: pink"
+		case "cyber":
+			m.theme = "cyber"
+			applyTheme("cyber")
+			return "Theme: cyber"
+		case "dark":
+			m.theme = "dark"
+			applyTheme("dark")
+			return "Theme: dark"
+		default:
+			return "Themes: pink, cyber, dark. Current: " + m.theme
+		}
+
 	case "/cd":
 		if arg == "" {
 			return "Dir: " + m.agent.WorkDir()
@@ -660,7 +730,7 @@ func (m Model) viewChat() string {
 	var toolContent string
 	if len(m.toolLog) == 0 {
 		if m.busy {
-			toolContent = DimStyle.Render("  thinking...")
+			toolContent = "  " + m.spin.View() + " thinking..."
 		} else {
 			toolContent = DimStyle.Render("  ready")
 		}
@@ -679,9 +749,9 @@ func (m Model) viewChat() string {
 	// ── Status line ──
 	busyStr := ""
 	if m.busy {
-		busyStr = " ⟳ Esc=cancel"
+		busyStr = " " + m.spin.View() + " Esc=cancel"
 	}
-	statusText := fmt.Sprintf(" ♥ v%s │ %s │ %d↑ %d↓%s │ Mem:%d │ Ctrl+B Ctrl+T ",
+	statusText := fmt.Sprintf(" ♥ v%s │ %s │ %d↑ %d↓%s │ Mem:%d ",
 		m.version, m.cfg.Username, m.inputTokens, m.outputTokens, busyStr, m.agent.Memory.Count())
 	statusLine := StatusBarStyle.Width(mw).Render(statusText)
 
