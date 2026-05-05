@@ -35,6 +35,12 @@ func Registry(hasSSH bool) []Tool {
 		DiffTool(),
 		// Agent
 		AgentTool(),
+		// Notebook
+		NotebookEditTool(),
+		// Tasks
+		TaskCreateTool(),
+		TaskUpdateTool(),
+		TaskGetTool(),
 		// Memory
 		RememberTool(),
 	}
