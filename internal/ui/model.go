@@ -49,8 +49,9 @@ type Model struct {
 	startTime time.Time
 	cancelCh  chan struct{} // cancel current task
 
-	chatLines []string
-	toolLog   []string
+	chatLines    []string
+	toolLog      []string
+	lastCtrlC    time.Time // for double ctrl+c to quit
 
 	agent        *agent.Agent
 	cfg          *config.Config
@@ -148,7 +149,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			if m.busy {
-				// Cancel current task
+				// First Ctrl+C cancels task
 				if m.cancelCh != nil {
 					close(m.cancelCh)
 					m.cancelCh = nil
@@ -156,13 +157,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.agent.Cancel()
 				m.busy = false
 				m.streaming = false
+				m.spinActive = false
 				m.chatLines = append(m.chatLines, ToolErrorStyle.Render("  ✗ Cancelled"), "")
 				m.toolLog = append(m.toolLog, ToolErrorStyle.Render("✗ CANCELLED"))
 				m.refreshChat()
 				return m, nil
 			}
-			m.agent.SaveSession()
-			return m, tea.Quit
+			// Double Ctrl+C to quit (within 2 seconds)
+			now := time.Now()
+			if now.Sub(m.lastCtrlC) < 2*time.Second {
+				m.agent.SaveSession()
+				return m, tea.Quit
+			}
+			m.lastCtrlC = now
+			m.chatLines = append(m.chatLines, DimStyle.Render("  Press Ctrl+C again to quit"), "")
+			m.refreshChat()
+			return m, nil
 
 		case "esc":
 			if m.state == StateLanding {
