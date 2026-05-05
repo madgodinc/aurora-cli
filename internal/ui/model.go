@@ -386,18 +386,25 @@ func (m *Model) handleCommand(input string) string {
 	}
 	switch cmd {
 	case "/help":
-		return `Commands:
- /new           — new session
- /sessions      — list sessions
- /switch ID     — switch to session
- /compact       — compress history
- /export [file] — export session to markdown
- /import file   — import session from file
- /memory        — show Memory Palace
- /remember k=v  — save to memory
- /clear         — clear display
- /status        — show stats
- /quit          — save & exit
+		return `Sessions:
+ /new           new session
+ /sessions      list sessions
+ /switch ID     switch to session
+ /compact       compress history
+ /export [file] export markdown
+ /import file   import session
+Quick:
+ /run cmd       run bash command
+ /brain cmd     run on server (SSH)
+ /tree [dir]    show file tree
+ /test [cmd]    run project tests
+ /diff [staged] show git diff
+ /cd dir        change directory
+Memory:
+ /memory        show Memory Palace
+ /remember k=v  save fact
+Other:
+ /clear  /status  /quit
  Ctrl+B sidebar | Ctrl+T tab | Esc cancel`
 
 	case "/quit", "/exit", "/q":
@@ -514,6 +521,62 @@ func (m *Model) handleCommand(input string) string {
 		}
 		m.agent.Memory.AddFact(arg)
 		return "Fact saved."
+
+	case "/run":
+		if arg == "" {
+			return "/run <command>"
+		}
+		result := tools.FindTool("Bash", m.cfg.HasSSH).Execute(map[string]interface{}{"command": arg})
+		if len(result) > 500 {
+			result = result[:500] + "..."
+		}
+		return result
+
+	case "/brain":
+		if arg == "" {
+			return "/brain <command on server>"
+		}
+		if !m.cfg.HasSSH {
+			return "No SSH access"
+		}
+		t := tools.FindTool("RemoteShell", m.cfg.HasSSH)
+		if t == nil {
+			return "RemoteShell not available"
+		}
+		result := t.Execute(map[string]interface{}{"command": arg})
+		if len(result) > 500 {
+			result = result[:500] + "..."
+		}
+		return result
+
+	case "/tree":
+		t := tools.FindTool("Tree", m.cfg.HasSSH)
+		if t == nil {
+			return "Tree tool not available"
+		}
+		dir := arg
+		if dir == "" {
+			dir = m.agent.WorkDir()
+		}
+		return t.Execute(map[string]interface{}{"path": dir, "depth": float64(3)})
+
+	case "/test":
+		t := tools.FindTool("RunTest", m.cfg.HasSSH)
+		if t == nil {
+			return "RunTest not available"
+		}
+		return t.Execute(map[string]interface{}{"command": arg, "path": m.agent.WorkDir()})
+
+	case "/diff":
+		t := tools.FindTool("Diff", m.cfg.HasSSH)
+		if t == nil {
+			return "Diff not available"
+		}
+		mode := "git"
+		if arg == "staged" {
+			mode = "staged"
+		}
+		return t.Execute(map[string]interface{}{"mode": mode})
 
 	case "/cd":
 		if arg == "" {
