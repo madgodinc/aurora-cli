@@ -243,7 +243,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			m.inputHistory = append(m.inputHistory, val)
 			m.historyIdx = -1
-			m.chatLines = append(m.chatLines, PromptStyle.Render("♥ You: ")+val, "")
+			// User message with green border
+			userBorder := lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(Green).
+				Padding(0, 1).
+				MaxWidth(m.mainWidth() - 4)
+			m.chatLines = append(m.chatLines, UserNameStyle.Render("You"), userBorder.Render(val), "")
 			m.input.Reset()
 			m.busy = true
 			m.spinActive = true
@@ -406,11 +412,15 @@ func (m *Model) finalizeStream() {
 	}
 	marker := "♥ Aurora: "
 	rendered := renderMarkdown(m.streamBuf)
+	maxW := m.mainWidth() - 6
+	if maxW < 30 {
+		maxW = 30
+	}
 	border := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(Pink).
 		Padding(0, 1).
-		MaxWidth(m.mainWidth() - 4)
+		Width(maxW)
 	for i := len(m.chatLines) - 1; i >= 0; i-- {
 		if strings.Contains(m.chatLines[i], marker) {
 			m.chatLines[i] = AuroraNameStyle.Render("♥ Aurora") + "\n" + border.Render(rendered)
@@ -762,9 +772,32 @@ func (m Model) viewChat() string {
 	sep := SeparatorStyle.Render(strings.Repeat("─", mw))
 	promptIcon := PromptStyle.Render("♥ ")
 	if m.busy {
-		promptIcon = DimStyle.Render("⟳ ")
+		promptIcon = DimStyle.Render(m.spin.View() + " ")
 	}
+
+	// Show command hints when typing /
+	inputVal := m.input.Value()
+	cmdHint := ""
+	if strings.HasPrefix(inputVal, "/") && !m.busy {
+		typed := strings.ToLower(inputVal)
+		cmds := []string{"/help", "/new", "/sessions", "/switch", "/compact", "/export", "/import",
+			"/run", "/brain", "/tree", "/test", "/diff", "/theme", "/cd", "/memory", "/remember",
+			"/clear", "/status", "/quit"}
+		var matches []string
+		for _, c := range cmds {
+			if strings.HasPrefix(c, typed) {
+				matches = append(matches, c)
+			}
+		}
+		if len(matches) > 0 && len(matches) < 8 {
+			cmdHint = DimStyle.Render("  " + strings.Join(matches, "  "))
+		}
+	}
+
 	inputLine := promptIcon + m.input.View()
+	if cmdHint != "" {
+		inputLine += "\n" + cmdHint
+	}
 
 	mainCol := lipgloss.JoinVertical(lipgloss.Left, topBar, statusLine, chatContent, sep, inputLine)
 
