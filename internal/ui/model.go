@@ -270,7 +270,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		ev := agent.Event(msg)
 		switch ev.Type {
 		case "text":
-			m.streamBuf += ev.Text
+			// Filter bell and control chars
+			clean := strings.ReplaceAll(ev.Text, "\x07", "")
+			clean = strings.ReplaceAll(clean, "\x08", "")
+			m.streamBuf += clean
 			m.streaming = true
 			m.updateStreamLine()
 
@@ -388,21 +391,36 @@ func (m *Model) relayout() {
 	m.refreshChat()
 }
 
+func (m *Model) streamBorder() lipgloss.Style {
+	maxW := m.mainWidth() - 6
+	if maxW < 30 {
+		maxW = 30
+	}
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(Pink).
+		Padding(0, 1).
+		Width(maxW)
+}
+
 func (m *Model) updateStreamLine() {
-	marker := "♥ Aurora: "
+	// Build bordered content live during streaming
+	content := m.streamBuf + DimStyle.Render(" ●")
+	bordered := AuroraNameStyle.Render("♥ Aurora") + "\n" + m.streamBorder().Render(content)
+
 	found := false
 	for i := len(m.chatLines) - 1; i >= 0; i-- {
-		if strings.Contains(m.chatLines[i], marker) {
-			m.chatLines[i] = AuroraNameStyle.Render(marker) + m.streamBuf + DimStyle.Render(" ●")
+		if strings.HasPrefix(m.chatLines[i], AuroraNameStyle.Render("♥ Aurora")) {
+			m.chatLines[i] = bordered
 			found = true
 			break
 		}
-		if strings.Contains(m.chatLines[i], "♥ You:") {
+		if strings.Contains(m.chatLines[i], "You") {
 			break
 		}
 	}
 	if !found {
-		m.chatLines = append(m.chatLines, AuroraNameStyle.Render(marker)+m.streamBuf+DimStyle.Render(" ●"))
+		m.chatLines = append(m.chatLines, bordered)
 	}
 }
 
@@ -410,20 +428,12 @@ func (m *Model) finalizeStream() {
 	if m.streamBuf == "" {
 		return
 	}
-	marker := "♥ Aurora: "
 	rendered := renderMarkdown(m.streamBuf)
-	maxW := m.mainWidth() - 6
-	if maxW < 30 {
-		maxW = 30
-	}
-	border := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(Pink).
-		Padding(0, 1).
-		Width(maxW)
+	bordered := AuroraNameStyle.Render("♥ Aurora") + "\n" + m.streamBorder().Render(rendered)
+
 	for i := len(m.chatLines) - 1; i >= 0; i-- {
-		if strings.Contains(m.chatLines[i], marker) {
-			m.chatLines[i] = AuroraNameStyle.Render("♥ Aurora") + "\n" + border.Render(rendered)
+		if strings.HasPrefix(m.chatLines[i], AuroraNameStyle.Render("♥ Aurora")) {
+			m.chatLines[i] = bordered
 			break
 		}
 	}
