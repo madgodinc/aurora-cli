@@ -285,25 +285,83 @@ func executeWebFetch(input map[string]interface{}) string {
 	if m, ok := input["max_bytes"].(float64); ok && m > 0 {
 		maxBytes = int(m)
 	}
-
 	if rawURL == "" {
 		return "Error: url required"
 	}
 
-	req, _ := http.NewRequest("GET", rawURL, nil)
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; AuroraBot/1.0)")
+	// 1. Jina Reader — best quality, returns markdown
+	if result := fetchViaJina(rawURL, maxBytes); result != "" {
+		return result
+	}
+	// 2. Crawl4AI on brain — self-hosted fallback
+	if result := fetchViaCrawl4AI(rawURL, maxBytes); result != "" {
+		return result
+	}
+	// 3. Direct fetch — strip HTML manually
+	return fetchDirect(rawURL, maxBytes)
+}
 
+func fetchViaJina(rawURL string, maxBytes int) string {
+	jinaURL := "https://r.jina.ai/" + rawURL
+	req, _ := http.NewRequest("GET", jinaURL, nil)
+	req.Header.Set("Accept", "text/markdown")
+	client := &http.Client{Timeout: 20 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil || resp == nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return ""
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, int64(maxBytes)))
+	text := strings.TrimSpace(string(body))
+	if len(text) < 50 {
+		return ""
+	}
+	return text
+}
+
+func fetchViaCrawl4AI(rawURL string, maxBytes int) string {
+	apiURL := "http://192.168.0.100:11235/crawl"
+	payload := fmt.Sprintf(`{"urls":["%s"],"word_count_threshold":10}`, rawURL)
+	req, _ := http.NewRequest("POST", apiURL, strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil || resp == nil || resp.StatusCode != 200 {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return ""
+	}
+	defer resp.Body.Close()
+	var data struct {
+		Results []struct {
+			Markdown string `json:"markdown"`
+		} `json:"results"`
+	}
+	json.NewDecoder(resp.Body).Decode(&data)
+	if len(data.Results) == 0 || data.Results[0].Markdown == "" {
+		return ""
+	}
+	text := data.Results[0].Markdown
+	if len(text) > maxBytes {
+		text = text[:maxBytes]
+	}
+	return text
+}
+
+func fetchDirect(rawURL string, maxBytes int) string {
+	req, _ := http.NewRequest("GET", rawURL, nil)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Sprintf("Fetch error: %v", err)
 	}
 	defer resp.Body.Close()
-
-	// Read limited
-	limited := io.LimitReader(resp.Body, int64(maxBytes*2))
-	body, _ := io.ReadAll(limited)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, int64(maxBytes*2)))
 	text := string(body)
-
 	ct := resp.Header.Get("Content-Type")
 	if strings.Contains(ct, "json") {
 		if len(text) > maxBytes {
@@ -311,21 +369,17 @@ func executeWebFetch(input map[string]interface{}) string {
 		}
 		return text
 	}
-
 	if strings.Contains(ct, "html") {
-		// Strip scripts, styles, tags
 		scriptRe := regexp.MustCompile(`(?is)<script[^>]*>.*?</script>`)
 		styleRe := regexp.MustCompile(`(?is)<style[^>]*>.*?</style>`)
 		tagRe := regexp.MustCompile(`<[^>]+>`)
 		spaceRe := regexp.MustCompile(`\s+`)
-
 		text = scriptRe.ReplaceAllString(text, "")
 		text = styleRe.ReplaceAllString(text, "")
 		text = tagRe.ReplaceAllString(text, " ")
 		text = spaceRe.ReplaceAllString(text, " ")
 		text = strings.TrimSpace(text)
 	}
-
 	if len(text) > maxBytes {
 		text = text[:maxBytes]
 	}
