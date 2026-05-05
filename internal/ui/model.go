@@ -243,13 +243,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			m.inputHistory = append(m.inputHistory, val)
 			m.historyIdx = -1
+
+			// Process @file references — read files and attach to message
+			displayVal := val
+			sendVal := expandFileRefs(val)
+
 			// User message with green border
 			userBorder := lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
 				BorderForeground(Green).
 				Padding(0, 1).
 				MaxWidth(m.mainWidth() - 4)
-			m.chatLines = append(m.chatLines, UserNameStyle.Render("You"), userBorder.Render(val), "")
+			m.chatLines = append(m.chatLines, UserNameStyle.Render("You"), userBorder.Render(displayVal), "")
 			m.input.Reset()
 			m.busy = true
 			m.spinActive = true
@@ -261,7 +266,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancelCh = make(chan struct{})
 
 			ch := m.agent.Events()
-			go m.agent.Run(val)
+			go m.agent.Run(sendVal)
 			m.refreshChat()
 			return m, tea.Batch(listenAgent(ch), m.spin.Tick)
 		}
@@ -916,6 +921,76 @@ func (m Model) renderSessionsSidebar(w int, sep string) string {
 
 	return lipgloss.NewStyle().Width(m.sidebarWidth).Height(m.height - 1).
 		Render(strings.Join(parts, "\n"))
+}
+
+// expandFileRefs finds @path references in text, reads files, appends content.
+// Supports: @C:\path\file.py, @./relative, @~/home, also drag-dropped paths in quotes.
+func expandFileRefs(text string) string {
+	// Find @path patterns
+	var paths []string
+	parts := strings.Fields(text)
+	cleanMsg := text
+
+	for _, p := range parts {
+		if strings.HasPrefix(p, "@") && len(p) > 1 {
+			fp := strings.TrimPrefix(p, "@")
+			fp = strings.Trim(fp, "\"'")
+			paths = append(paths, fp)
+		}
+	}
+
+	// Also find quoted paths (drag-drop on Windows inserts "C:\path\file")
+	// Match paths like C:\..., /c/..., ./...
+	for _, p := range parts {
+		p = strings.Trim(p, "\"'")
+		if (len(p) > 3 && p[1] == ':' && (p[2] == '\\' || p[2] == '/')) ||
+			strings.HasPrefix(p, "/c/") || strings.HasPrefix(p, "/d/") {
+			// Check if it's a file
+			if info, err := os.Stat(p); err == nil && !info.IsDir() {
+				alreadyFound := false
+				for _, existing := range paths {
+					if existing == p {
+						alreadyFound = true
+					}
+				}
+				if !alreadyFound {
+					paths = append(paths, p)
+				}
+			}
+		}
+	}
+
+	if len(paths) == 0 {
+		return text
+	}
+
+	// Read files and append
+	var attachments []string
+	for _, fp := range paths {
+		// Clean @prefix from message
+		cleanMsg = strings.ReplaceAll(cleanMsg, "@"+fp, "")
+		cleanMsg = strings.ReplaceAll(cleanMsg, fp, "")
+
+		data, err := os.ReadFile(fp)
+		if err != nil {
+			attachments = append(attachments, fmt.Sprintf("[File error: %s — %v]", fp, err))
+			continue
+		}
+		content := string(data)
+		if len(content) > 50000 {
+			content = content[:50000] + "\n... (truncated)"
+		}
+		ext := filepath.Ext(fp)
+		lang := strings.TrimPrefix(ext, ".")
+		attachments = append(attachments, fmt.Sprintf("[File: %s]\n```%s\n%s\n```", fp, lang, content))
+	}
+
+	cleanMsg = strings.TrimSpace(cleanMsg)
+	if cleanMsg == "" {
+		cleanMsg = "Прочитай и проанализируй файл(ы)"
+	}
+
+	return cleanMsg + "\n\n" + strings.Join(attachments, "\n\n")
 }
 
 func min(a, b int) int {
