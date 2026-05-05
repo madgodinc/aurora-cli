@@ -775,28 +775,30 @@ func (m Model) viewChat() string {
 		promptIcon = DimStyle.Render(m.spin.View() + " ")
 	}
 
+	inputLine := promptIcon + m.input.View()
+
 	// Show command hints when typing /
-	inputVal := m.input.Value()
-	cmdHint := ""
-	if strings.HasPrefix(inputVal, "/") && !m.busy {
-		typed := strings.ToLower(inputVal)
-		cmds := []string{"/help", "/new", "/sessions", "/switch", "/compact", "/export", "/import",
-			"/run", "/brain", "/tree", "/test", "/diff", "/theme", "/cd", "/memory", "/remember",
-			"/clear", "/status", "/quit"}
-		var matches []string
-		for _, c := range cmds {
-			if strings.HasPrefix(c, typed) {
-				matches = append(matches, c)
+	if !m.busy {
+		inputVal := m.input.Value()
+		if strings.HasPrefix(inputVal, "/") {
+			typed := strings.ToLower(strings.TrimSpace(inputVal))
+			allCmds := []string{"/help", "/new", "/sessions", "/switch", "/compact", "/export", "/import",
+				"/run", "/brain", "/tree", "/test", "/diff", "/theme", "/cd", "/memory", "/remember",
+				"/clear", "/status", "/quit"}
+			var matches []string
+			for _, c := range allCmds {
+				if strings.HasPrefix(c, typed) {
+					matches = append(matches, c)
+				}
+			}
+			if len(matches) > 0 {
+				hint := strings.Join(matches, "  ")
+				if len(hint) > mw-4 {
+					hint = hint[:mw-4]
+				}
+				inputLine += "\n" + DimStyle.Render("  "+hint)
 			}
 		}
-		if len(matches) > 0 && len(matches) < 8 {
-			cmdHint = DimStyle.Render("  " + strings.Join(matches, "  "))
-		}
-	}
-
-	inputLine := promptIcon + m.input.View()
-	if cmdHint != "" {
-		inputLine += "\n" + cmdHint
 	}
 
 	mainCol := lipgloss.JoinVertical(lipgloss.Left, topBar, statusLine, chatContent, sep, inputLine)
